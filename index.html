@@ -8,23 +8,44 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <main class="app">
-      <section class="recorder">
-        <p id="timer" class="timer">00:00</p>
-        <button id="record" class="record" type="button" aria-pressed="false">
-          <span class="dot" aria-hidden="true"></span>
-          <span class="label">Record</span>
-        </button>
-        <button id="mark" class="mark-button" type="button" hidden>
-          Mark this moment <kbd>⌥⌘M</kbd>
-        </button>
-        <p id="status" class="status" role="status"></p>
-      </section>
+    <div class="layout">
+      <aside class="sidebar">
+        <input
+          id="search"
+          class="search"
+          type="search"
+          placeholder="Search all lectures"
+          aria-label="Search all lectures"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <ul id="lecture-list" class="lecture-list"></ul>
+        <ul id="search-results" class="search-results" hidden></ul>
+        <p id="sidebar-empty" class="sidebar-empty" hidden></p>
+      </aside>
 
-      <section id="playback" class="playback" hidden>
-        <audio id="player" controls preload="metadata"></audio>
-        <ol id="transcript" class="transcript"></ol>
-      </section>
-    </main>
+      <main class="app">
+        <section class="recorder">
+          <p id="timer" class="timer">00:00</p>
+          <button id="record" class="record" type="button" aria-pressed="false">
+            <span class="dot" aria-hidden="true"></span>
+            <span class="label">Record</span>
+          </button>
+          <button id="mark" class="mark-button" type="button" hidden>
+            Mark this moment <kbd>⌥⌘M</kbd>
+          </button>
+          <p id="status" class="status" role="status"></p>
+        </section>
+
+        <section id="playback" class="playback" hidden>
+          <div class="playback-header">
+            <h2 id="lecture-title" class="lecture-title"></h2>
+            <button id="export" class="export-button" type="button">Export</button>
+          </div>
+          <audio id="player" controls preload="metadata"></audio>
+          <ol id="transcript" class="transcript"></ol>
+        </section>
+      </main>
+    </div>
   </body>
 </html>

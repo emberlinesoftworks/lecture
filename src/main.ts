@@ -24,14 +24,36 @@ type StoppedRecording = {
   marks: number[];
 };
 
+type LectureSummary = {
+  path: string;
+  recorded_at: number;
+  duration_ms: number;
+  preview: string;
+  mark_count: number;
+};
+
+type SearchHit = {
+  path: string;
+  recorded_at: number;
+  line_index: number;
+  start_ms: number;
+  text: string;
+};
+
 const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
 const buttonLabel = recordButton.querySelector<HTMLElement>(".label")!;
 const markButton = document.querySelector<HTMLButtonElement>("#mark")!;
 const timer = document.querySelector<HTMLElement>("#timer")!;
 const statusText = document.querySelector<HTMLElement>("#status")!;
 const playback = document.querySelector<HTMLElement>("#playback")!;
+const lectureTitle = document.querySelector<HTMLElement>("#lecture-title")!;
+const exportButton = document.querySelector<HTMLButtonElement>("#export")!;
 const player = document.querySelector<HTMLAudioElement>("#player")!;
 const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
+const searchInput = document.querySelector<HTMLInputElement>("#search")!;
+const lectureList = document.querySelector<HTMLUListElement>("#lecture-list")!;
+const searchResults = document.querySelector<HTMLUListElement>("#search-results")!;
+const sidebarEmpty = document.querySelector<HTMLElement>("#sidebar-empty")!;
 
 let startTime = 0;
 let timerInterval: number | undefined;
@@ -40,6 +62,8 @@ let audioContext: AudioContext | undefined;
 let segments: Segment[] = [];
 let lineButtons: HTMLButtonElement[] = [];
 let currentLine = -1;
+let currentPath = "";
+let searchTimeout: number | undefined;
 
 // turns milliseconds into 03:25 (or 1:03:25 once it passes an hour)
 function formatTime(milliseconds: number) {
@@ -48,6 +72,23 @@ function formatTime(milliseconds: number) {
   const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, "0");
   const seconds = String(totalSeconds % 60).padStart(2, "0");
   return hours > 0 ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
+}
+
+// recordings are named by when they started, e.g. "Sat, Nov 14, 11:47 PM"
+function formatDate(unixSeconds: number) {
+  return new Date(unixSeconds * 1000).toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+// the lecture-123 part of the path is the start time
+function recordedAtFromPath(path: string) {
+  const match = path.match(/lecture-(\d+)\.wav$/);
+  return match ? Number(match[1]) : 0;
 }
 
 function setRecording(isRecording: boolean) {
@@ -82,6 +123,7 @@ listen<number>("mark-added", (event) => {
 
 // each line is a button, clicking it jumps the audio to when that was said
 function showTranscript(audioPath: string, transcript: Transcript) {
+  currentPath = audioPath;
   segments = transcript.lines;
   lineButtons = [];
   currentLine = -1;
@@ -108,14 +150,16 @@ function showTranscript(audioPath: string, transcript: Transcript) {
   // rust works out which lines each mark covers (see marks.rs)
   for (const range of transcript.marks) {
     for (let index = range.first_line; index <= range.last_line; index++) {
-      lineButtons[index].classList.add("in-mark");
+      lineButtons[index]?.classList.add("in-mark");
     }
-    lineButtons[range.first_line].classList.add("marked");
-    lineButtons[range.first_line].title = `You marked this at ${formatTime(range.mark_ms)}`;
+    lineButtons[range.first_line]?.classList.add("marked");
+    lineButtons[range.first_line]?.setAttribute("title", `You marked this at ${formatTime(range.mark_ms)}`);
   }
 
+  lectureTitle.textContent = formatDate(recordedAtFromPath(audioPath));
   player.src = convertFileSrc(audioPath);
   playback.hidden = segments.length === 0;
+  highlightOpenLecture();
 }
 
 function playFrom(index: number) {
@@ -139,6 +183,148 @@ player.addEventListener("timeupdate", () => {
   }
 });
 
+async function openLecture(path: string, jumpToLine?: number) {
+  try {
+    const transcript = await invoke<Transcript>("open_lecture", { path });
+    showTranscript(path, transcript);
+    statusText.textContent = "";
+
+    if (jumpToLine !== undefined) {
+      lineButtons[jumpToLine]?.scrollIntoView({ block: "center" });
+      playFrom(jumpToLine);
+    }
+  } catch (error) {
+    statusText.textContent = String(error);
+  }
+}
+
+// --- sidebar: saved lectures and search ---
+
+function highlightOpenLecture() {
+  for (const button of lectureList.querySelectorAll<HTMLButtonElement>("button")) {
+    button.classList.toggle("open", button.dataset.path === currentPath);
+  }
+}
+
+async function refreshLectureList() {
+  const lectures = await invoke<LectureSummary[]>("list_lectures");
+  lectureList.replaceChildren();
+
+  for (const lecture of lectures) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const date = document.createElement("span");
+    const preview = document.createElement("span");
+    const details = document.createElement("span");
+
+    button.type = "button";
+    button.className = "lecture-item";
+    button.dataset.path = lecture.path;
+    date.className = "lecture-date";
+    preview.className = "lecture-preview";
+    details.className = "lecture-details";
+
+    date.textContent = formatDate(lecture.recorded_at);
+    preview.textContent = lecture.preview;
+    details.textContent = formatTime(lecture.duration_ms);
+    if (lecture.mark_count > 0) {
+      details.textContent += ` · ${lecture.mark_count} ${lecture.mark_count === 1 ? "mark" : "marks"}`;
+    }
+
+    button.append(date, preview, details);
+    button.addEventListener("click", () => openLecture(lecture.path));
+    item.append(button);
+    lectureList.append(item);
+  }
+
+  sidebarEmpty.textContent = "Your lectures will show up here after you record one.";
+  sidebarEmpty.hidden = lectures.length > 0 || !searchResults.hidden;
+  highlightOpenLecture();
+}
+
+// puts <mark> around every match without ever treating the text as HTML
+function highlightMatches(text: string, query: string) {
+  const fragment = document.createDocumentFragment();
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  let position = 0;
+
+  while (position < text.length) {
+    const found = lowerText.indexOf(lowerQuery, position);
+    if (found === -1) break;
+
+    fragment.append(text.slice(position, found));
+    const match = document.createElement("mark");
+    match.textContent = text.slice(found, found + query.length);
+    fragment.append(match);
+    position = found + query.length;
+  }
+  fragment.append(text.slice(position));
+  return fragment;
+}
+
+async function runSearch() {
+  const query = searchInput.value.trim();
+
+  // empty search box shows the normal lecture list again
+  if (!query) {
+    searchResults.hidden = true;
+    lectureList.hidden = false;
+    sidebarEmpty.hidden = lectureList.children.length > 0;
+    return;
+  }
+
+  const hits = await invoke<SearchHit[]>("search_lectures", { query });
+  searchResults.replaceChildren();
+
+  for (const hit of hits) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const where = document.createElement("span");
+    const text = document.createElement("span");
+
+    button.type = "button";
+    button.className = "search-hit";
+    where.className = "lecture-date";
+    text.className = "search-text";
+
+    where.textContent = `${formatDate(hit.recorded_at)} · ${formatTime(hit.start_ms)}`;
+    text.append(highlightMatches(hit.text, query));
+
+    button.append(where, text);
+    button.addEventListener("click", () => openLecture(hit.path, hit.line_index));
+    item.append(button);
+    searchResults.append(item);
+  }
+
+  lectureList.hidden = true;
+  searchResults.hidden = false;
+  sidebarEmpty.textContent = `Nothing found for "${query}"`;
+  sidebarEmpty.hidden = hits.length > 0;
+}
+
+// wait until typing pauses so we don't search on every key
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => {
+    runSearch().catch((error) => (statusText.textContent = String(error)));
+  }, 200);
+});
+
+exportButton.addEventListener("click", async () => {
+  try {
+    const exportedPath = await invoke<string>("export_lecture", {
+      path: currentPath,
+      title: `Lecture, ${lectureTitle.textContent}`,
+    });
+    statusText.textContent = `Exported to ${exportedPath}`;
+  } catch (error) {
+    statusText.textContent = String(error);
+  }
+});
+
+// --- recording ---
+
 async function transcribe(path: string, marks: number[]) {
   statusText.textContent = "Transcribing...";
   const started = Date.now();
@@ -147,8 +333,9 @@ async function transcribe(path: string, marks: number[]) {
 
   const seconds = Math.round((Date.now() - started) / 1000);
   const markNote = marks.length > 0 ? `, ${marks.length} marked` : "";
-  statusText.textContent = `Transcribed in ${seconds}s${markNote}. Saved next to ${path}`;
+  statusText.textContent = `Transcribed in ${seconds}s${markNote}`;
   showTranscript(path, transcript);
+  await refreshLectureList();
 }
 
 markButton.addEventListener("click", () => {
@@ -190,3 +377,5 @@ recordButton.addEventListener("click", async () => {
     recordButton.disabled = false;
   }
 });
+
+refreshLectureList().catch((error) => (statusText.textContent = String(error)));

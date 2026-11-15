@@ -1,3 +1,4 @@
+pub mod lectures;
 pub mod marks;
 mod recorder;
 pub mod transcriber;
@@ -10,8 +11,7 @@ use recorder::Recording;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-use marks::MarkedRange;
-use transcriber::Segment;
+use lectures::{LectureSummary, SearchHit, Transcript};
 
 #[derive(Default)]
 struct AppState {
@@ -19,15 +19,24 @@ struct AppState {
 }
 
 #[derive(Serialize)]
-struct Transcript {
-    lines: Vec<Segment>,
-    marks: Vec<MarkedRange>,
-}
-
-#[derive(Serialize)]
 struct StoppedRecording {
     path: String,
     marks: Vec<u64>,
+}
+
+// where every recording, transcript and export lives
+fn lecture_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().document_dir().map_err(|e| e.to_string())?.join("Lecture"))
+}
+
+// only touch files in the Lecture folder, whatever path the window sends
+fn lecture_file(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
+    let folder = lecture_folder(app)?;
+    let path = PathBuf::from(path);
+    if path.parent() != Some(folder.as_path()) {
+        return Err("That file isn't in the Lecture folder".into());
+    }
+    Ok(path)
 }
 
 #[tauri::command]
@@ -38,7 +47,7 @@ fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<Stri
     }
 
     // make sure Documents/Lecture exists
-    let lecture_folder = app.path().document_dir().map_err(|e| e.to_string())?.join("Lecture");
+    let lecture_folder = lecture_folder(&app)?;
     std::fs::create_dir_all(&lecture_folder).map_err(|e| e.to_string())?;
 
     // TODO: name files by course and date once courses exist
@@ -93,7 +102,8 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
     }
 
     // whisper takes a while, so run it off the main thread to keep the window responsive
-    let wav_path = PathBuf::from(&path);
+    let wav_path = lecture_file(&app, &path)?;
+    let json_path = wav_path.with_extension("json");
     let lines = tauri::async_runtime::spawn_blocking(move || {
         transcriber::transcribe(&model_path, &wav_path)
     })
@@ -107,9 +117,32 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
 
     // save the transcript next to the recording
     let json = serde_json::to_string_pretty(&transcript).map_err(|e| e.to_string())?;
-    std::fs::write(PathBuf::from(&path).with_extension("json"), json).map_err(|e| e.to_string())?;
+    std::fs::write(json_path, json).map_err(|e| e.to_string())?;
 
     Ok(transcript)
+}
+
+#[tauri::command]
+fn list_lectures(app: tauri::AppHandle) -> Result<Vec<LectureSummary>, String> {
+    Ok(lectures::list_lectures(&lecture_folder(&app)?))
+}
+
+#[tauri::command]
+fn open_lecture(app: tauri::AppHandle, path: String) -> Result<Transcript, String> {
+    lectures::load_transcript(&lecture_file(&app, &path)?)
+}
+
+#[tauri::command]
+fn search_lectures(app: tauri::AppHandle, query: String) -> Result<Vec<SearchHit>, String> {
+    Ok(lectures::search(&lecture_folder(&app)?, &query))
+}
+
+// saves a Markdown copy next to the recording and shows it in Finder
+#[tauri::command]
+fn export_lecture(app: tauri::AppHandle, path: String, title: String) -> Result<String, String> {
+    let markdown_path = lectures::export_markdown(&lecture_file(&app, &path)?, &title)?;
+    tauri_plugin_opener::reveal_item_in_dir(&markdown_path).map_err(|e| e.to_string())?;
+    Ok(markdown_path.display().to_string())
 }
 
 // ⌥⌘M
@@ -143,7 +176,11 @@ pub fn run() {
             start_recording,
             stop_recording,
             mark_moment,
-            transcribe
+            transcribe,
+            list_lectures,
+            open_lecture,
+            search_lectures,
+            export_lecture
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

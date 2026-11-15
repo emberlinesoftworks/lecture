@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
@@ -12,12 +12,14 @@ const LONG_PAUSE_MS: i64 = 1500;
 // lines longer than this get broken at the next word
 const MAX_LINE_MS: i64 = 12_000;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Segment {
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
     // how long it was quiet right before this line started
+    // (older transcripts don't have this, so it defaults to 0)
+    #[serde(default)]
     pub pause_before_ms: i64,
 }
 

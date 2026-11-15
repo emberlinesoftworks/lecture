@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::transcriber::Segment;
 
@@ -6,10 +6,10 @@ use crate::transcriber::Segment;
 // so a mark reaches back to where that thought started:
 // a moment before the press, then back to the last pause (up to 20 seconds)
 const REACTION_MS: i64 = 2000;
-const PAUSE_MS: i64 = 700;
+const PAUSE_MS: i64 = 900;
 const MAX_LOOKBACK_MS: i64 = 20_000;
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MarkedRange {
     pub first_line: usize,
     pub last_line: usize,

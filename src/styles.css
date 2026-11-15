@@ -22,12 +22,19 @@ body {
   min-height: 100vh;
 }
 
+/* sidebar on the left, recorder and transcript on the right */
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100vh;
+}
+
 .app {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-height: 100vh;
   padding: 48px 32px;
+  overflow-y: auto;
 }
 
 .recorder {
@@ -247,5 +254,169 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .record.recording .dot {
     animation: none;
+  }
+}
+
+.line.in-mark.current {
+  background: #1a0f0c;
+}
+
+/* sidebar */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 12px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.search {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #160d0b;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.search::placeholder {
+  color: #957f78;
+}
+
+.search:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 1px;
+}
+
+.lecture-list,
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lecture-list[hidden],
+.search-results[hidden] {
+  display: none;
+}
+
+.lecture-item,
+.search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lecture-item.open {
+  background: #1a0f0c;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.lecture-item:focus-visible,
+.search-hit:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: -2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lecture-item:hover,
+  .search-hit:hover {
+    background: #160d0b;
+  }
+}
+
+.lecture-date {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.lecture-preview {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lecture-details {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-text {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.search-text mark {
+  border-radius: 2px;
+  background: rgba(255, 90, 31, 0.25);
+  color: var(--text);
+}
+
+.sidebar-empty {
+  margin: 8px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* title and export above the player */
+.playback-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.lecture-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.export-button {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out);
+}
+
+.export-button:active {
+  transform: scale(0.97);
+}
+
+.export-button:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 3px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .export-button:hover {
+    color: var(--text);
+    border-color: var(--accent);
   }
 }
