@@ -1,12 +1,14 @@
 pub mod lectures;
+pub mod live;
 pub mod marks;
 mod recorder;
 pub mod transcriber;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use live::LiveTranscriber;
 use recorder::Recording;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -15,13 +17,38 @@ use lectures::{LectureSummary, SearchHit, Transcript};
 
 #[derive(Default)]
 struct AppState {
-    recording: Mutex<Option<Recording>>,
+    recording: Mutex<Option<ActiveRecording>>,
+}
+
+// the recording plus the transcriber working through it during class
+// (no transcriber if the model isn't installed yet)
+struct ActiveRecording {
+    recording: Recording,
+    live: Option<LiveTranscriber>,
 }
 
 #[derive(Serialize)]
 struct StoppedRecording {
     path: String,
     marks: Vec<u64>,
+    // missing if it couldn't be transcribed during class, then the window asks for it separately
+    transcript: Option<Transcript>,
+}
+
+fn model_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // TODO: download the model on first launch instead of copying it by hand
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("models")
+        .join("ggml-large-v3-turbo.bin"))
+}
+
+// saves the transcript next to the recording
+fn save_transcript(wav_path: &std::path::Path, transcript: &Transcript) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(transcript).map_err(|e| e.to_string())?;
+    std::fs::write(wav_path.with_extension("json"), json).map_err(|e| e.to_string())
 }
 
 // where every recording, transcript and export lives
@@ -54,22 +81,55 @@ fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<Stri
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let path = lecture_folder.join(format!("lecture-{timestamp}.wav"));
 
-    *recording = Some(Recording::start(path.clone())?);
+    // the recorder shares its audio with the transcriber as it goes
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let new_recording = Recording::start(path.clone(), pending.clone())?;
+
+    let model_path = model_path(&app)?;
+    let live = model_path.exists().then(|| {
+        let progress_app = app.clone();
+        LiveTranscriber::start(model_path, pending, move |done_ms| {
+            let _ = progress_app.emit("transcribed-up-to", done_ms);
+        })
+    });
+
+    *recording = Some(ActiveRecording { recording: new_recording, live });
     Ok(path.display().to_string())
 }
 
 #[tauri::command]
-fn stop_recording(state: State<AppState>) -> Result<StoppedRecording, String> {
-    let recording = state.recording.lock().unwrap().take().ok_or("Not recording")?;
-    let (path, marks) = recording.stop()?;
+async fn stop_recording(state: State<'_, AppState>) -> Result<StoppedRecording, String> {
+    let active = state.recording.lock().unwrap().take().ok_or("Not recording")?;
+
+    // finishing the last minute of transcription takes a few seconds, so do it off the main thread
+    let (path, marks, lines) = tauri::async_runtime::spawn_blocking(move || {
+        let (path, marks) = active.recording.stop()?;
+        let lines = active.live.and_then(|live| live.finish().ok());
+        Ok::<_, String>((path, marks, lines))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     // keep the marks next to the recording so they survive restarts
     let marks_json = serde_json::to_string(&marks).map_err(|e| e.to_string())?;
     std::fs::write(path.with_extension("marks.json"), marks_json).map_err(|e| e.to_string())?;
 
+    let transcript = match lines {
+        Some(lines) => {
+            let transcript = Transcript {
+                marks: marks::marked_ranges(&lines, &marks),
+                lines,
+            };
+            save_transcript(&path, &transcript)?;
+            Some(transcript)
+        }
+        None => None,
+    };
+
     Ok(StoppedRecording {
         path: path.display().to_string(),
         marks,
+        transcript,
     })
 }
 
@@ -77,7 +137,7 @@ fn stop_recording(state: State<AppState>) -> Result<StoppedRecording, String> {
 fn add_mark(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut recording = state.recording.lock().unwrap();
-    let mark_ms = recording.as_mut().ok_or("Not recording")?.add_mark();
+    let mark_ms = recording.as_mut().ok_or("Not recording")?.recording.add_mark();
 
     // let the window know so it can show the mark
     app.emit("mark-added", mark_ms).map_err(|e| e.to_string())
@@ -90,20 +150,13 @@ fn mark_moment(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Result<Transcript, String> {
-    // TODO: download the model on first launch instead of copying it by hand
-    let model_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("models")
-        .join("ggml-large-v3-turbo.bin");
+    let model_path = model_path(&app)?;
     if !model_path.exists() {
         return Err(format!("Model not found at {}", model_path.display()));
     }
 
     // whisper takes a while, so run it off the main thread to keep the window responsive
     let wav_path = lecture_file(&app, &path)?;
-    let json_path = wav_path.with_extension("json");
     let lines = tauri::async_runtime::spawn_blocking(move || {
         transcriber::transcribe(&model_path, &wav_path)
     })
@@ -115,10 +168,7 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
         lines,
     };
 
-    // save the transcript next to the recording
-    let json = serde_json::to_string_pretty(&transcript).map_err(|e| e.to_string())?;
-    std::fs::write(json_path, json).map_err(|e| e.to_string())?;
-
+    save_transcript(&lecture_file(&app, &path)?, &transcript)?;
     Ok(transcript)
 }
 

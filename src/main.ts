@@ -22,6 +22,8 @@ type Transcript = {
 type StoppedRecording = {
   path: string;
   marks: number[];
+  // already done if it was transcribed during the recording
+  transcript: Transcript | null;
 };
 
 type LectureSummary = {
@@ -45,6 +47,7 @@ const buttonLabel = recordButton.querySelector<HTMLElement>(".label")!;
 const markButton = document.querySelector<HTMLButtonElement>("#mark")!;
 const timer = document.querySelector<HTMLElement>("#timer")!;
 const statusText = document.querySelector<HTMLElement>("#status")!;
+const progressText = document.querySelector<HTMLElement>("#progress")!;
 const playback = document.querySelector<HTMLElement>("#playback")!;
 const lectureTitle = document.querySelector<HTMLElement>("#lecture-title")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#export")!;
@@ -119,6 +122,12 @@ listen<number>("mark-added", (event) => {
   markCount++;
   playTick();
   statusText.textContent = `Marked ${formatTime(event.payload)} (${markCount} ${markCount === 1 ? "mark" : "marks"})`;
+});
+
+// the transcriber works through the recording about a minute at a time during class
+listen<number>("transcribed-up-to", (event) => {
+  if (!recordButton.classList.contains("recording")) return;
+  progressText.textContent = `Transcribed up to ${formatTime(event.payload)}`;
 });
 
 // each line is a button, clicking it jumps the audio to when that was said
@@ -325,6 +334,7 @@ exportButton.addEventListener("click", async () => {
 
 // --- recording ---
 
+// only needed if it couldn't transcribe during class (like if the model wasn't installed yet)
 async function transcribe(path: string, marks: number[]) {
   statusText.textContent = "Transcribing...";
   const started = Date.now();
@@ -332,10 +342,8 @@ async function transcribe(path: string, marks: number[]) {
   const transcript = await invoke<Transcript>("transcribe", { path, marks });
 
   const seconds = Math.round((Date.now() - started) / 1000);
-  const markNote = marks.length > 0 ? `, ${marks.length} marked` : "";
-  statusText.textContent = `Transcribed in ${seconds}s${markNote}`;
+  statusText.textContent = `Transcribed in ${seconds}s`;
   showTranscript(path, transcript);
-  await refreshLectureList();
 }
 
 markButton.addEventListener("click", () => {
@@ -349,11 +357,21 @@ recordButton.addEventListener("click", async () => {
 
   try {
     if (isRecording) {
-      // stop recording, then transcribe it
-      const stopped = await invoke<StoppedRecording>("stop_recording");
+      // stop recording. most of it is already transcribed, this just finishes the last bit
       clearInterval(timerInterval);
+      statusText.textContent = "Finishing the transcript...";
+      const stopped = await invoke<StoppedRecording>("stop_recording");
       setRecording(false);
-      await transcribe(stopped.path, stopped.marks);
+      progressText.textContent = "";
+
+      if (stopped.transcript) {
+        const markNote = stopped.marks.length > 0 ? `, ${stopped.marks.length} marked` : "";
+        statusText.textContent = `Transcript ready${markNote}`;
+        showTranscript(stopped.path, stopped.transcript);
+      } else {
+        await transcribe(stopped.path, stopped.marks);
+      }
+      await refreshLectureList();
     } else {
       // the tick sound needs this, and it has to be made after a click
       audioContext ??= new AudioContext();
@@ -368,6 +386,7 @@ recordButton.addEventListener("click", async () => {
         timer.textContent = formatTime(Date.now() - startTime);
       }, 250);
       statusText.textContent = "Recording. Press ⌥⌘M anytime to mark a moment";
+      progressText.textContent = "";
       playback.hidden = true;
       setRecording(true);
     }

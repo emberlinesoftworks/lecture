@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-const WHISPER_SAMPLE_RATE: u32 = 16_000;
+pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 // a silence this long between words starts a new line
 const PAUSE_BREAK_MS: i64 = 500;
@@ -23,12 +23,38 @@ pub struct Segment {
     pub pause_before_ms: i64,
 }
 
+// transcribes a whole recording from its file
 pub fn transcribe(model_path: &Path, wav_path: &Path) -> Result<Vec<Segment>, String> {
     let audio = load_audio(wav_path)?;
+    Transcriber::load(model_path)?.transcribe_audio(&audio, 0)
+}
 
-    // load the model (takes about a second)
-    let context = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-        .map_err(|e| format!("couldn't load model: {e}"))?;
+// keeps the model loaded so it can transcribe piece after piece during a class
+pub struct Transcriber {
+    context: WhisperContext,
+}
+
+impl Transcriber {
+    // loading the model takes about a second
+    pub fn load(model_path: &Path) -> Result<Self, String> {
+        let context = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+            .map_err(|e| format!("couldn't load model: {e}"))?;
+        Ok(Self { context })
+    }
+
+    // turns 16k mono audio into lines. start_ms is where this audio
+    // begins in the recording, so the times line up with the whole file
+    pub fn transcribe_audio(&self, audio: &[f32], start_ms: i64) -> Result<Vec<Segment>, String> {
+        let mut lines = transcribe_audio(&self.context, audio)?;
+        for line in &mut lines {
+            line.start_ms += start_ms;
+            line.end_ms += start_ms;
+        }
+        Ok(lines)
+    }
+}
+
+fn transcribe_audio(context: &WhisperContext, audio: &[f32]) -> Result<Vec<Segment>, String> {
     let mut state = context.create_state().map_err(|e| e.to_string())?;
 
     // same settings we tested with whisper-cli: english, beam search of 5
@@ -40,7 +66,7 @@ pub fn transcribe(model_path: &Path, wav_path: &Path) -> Result<Vec<Segment>, St
     params.set_print_timestamps(false);
     params.set_print_special(false);
 
-    state.full(params, &audio).map_err(|e| format!("transcription failed: {e}"))?;
+    state.full(params, audio).map_err(|e| format!("transcription failed: {e}"))?;
 
     // collect every word piece with its timing
     let mut tokens = Vec::new();
@@ -65,9 +91,11 @@ pub fn transcribe(model_path: &Path, wav_path: &Path) -> Result<Vec<Segment>, St
     // whisper's word timings stretch over pauses, and a line after a pause often
     // gets a start time from the beginning of the silence instead of the first word.
     // so look at the audio itself: find the real pause and start the line after it
-    let quiet_frames = find_quiet_frames(&audio);
-    for i in 1..lines.len() {
-        let previous_start = lines[i - 1].start_ms;
+    let quiet_frames = find_quiet_frames(audio);
+    // (the first line counts too, since during class this audio is a piece cut
+    // at a quiet spot, and that pause matters for marks)
+    for i in 0..lines.len() {
+        let previous_start = if i == 0 { -1000 } else { lines[i - 1].start_ms };
         let next_start = lines.get(i + 1).map(|line| line.start_ms).unwrap_or(i64::MAX);
 
         if let Some((pause_start, pause_end)) = longest_pause_near(&quiet_frames, previous_start, lines[i].start_ms) {
@@ -201,7 +229,7 @@ fn make_line(text: &str, start_ms: i64, end_ms: i64, capitalize_it: bool) -> Seg
     }
 }
 
-fn ends_sentence(text: &str) -> bool {
+pub(crate) fn ends_sentence(text: &str) -> bool {
     let text = text.trim_end();
     text.ends_with('.') || text.ends_with('?') || text.ends_with('!')
 }
