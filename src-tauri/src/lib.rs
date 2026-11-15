@@ -1,17 +1,33 @@
+pub mod marks;
 mod recorder;
-mod transcriber;
+pub mod transcriber;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use recorder::Recording;
-use tauri::{Manager, State};
+use serde::Serialize;
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use marks::MarkedRange;
 use transcriber::Segment;
 
 #[derive(Default)]
 struct AppState {
     recording: Mutex<Option<Recording>>,
+}
+
+#[derive(Serialize)]
+struct Transcript {
+    lines: Vec<Segment>,
+    marks: Vec<MarkedRange>,
+}
+
+#[derive(Serialize)]
+struct StoppedRecording {
+    path: String,
+    marks: Vec<u64>,
 }
 
 #[tauri::command]
@@ -34,14 +50,37 @@ fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<Stri
 }
 
 #[tauri::command]
-fn stop_recording(state: State<AppState>) -> Result<String, String> {
+fn stop_recording(state: State<AppState>) -> Result<StoppedRecording, String> {
     let recording = state.recording.lock().unwrap().take().ok_or("Not recording")?;
-    let path = recording.stop()?;
-    Ok(path.display().to_string())
+    let (path, marks) = recording.stop()?;
+
+    // keep the marks next to the recording so they survive restarts
+    let marks_json = serde_json::to_string(&marks).map_err(|e| e.to_string())?;
+    std::fs::write(path.with_extension("marks.json"), marks_json).map_err(|e| e.to_string())?;
+
+    Ok(StoppedRecording {
+        path: path.display().to_string(),
+        marks,
+    })
+}
+
+// the Mark button and the hotkey both end up here
+fn add_mark(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut recording = state.recording.lock().unwrap();
+    let mark_ms = recording.as_mut().ok_or("Not recording")?.add_mark();
+
+    // let the window know so it can show the mark
+    app.emit("mark-added", mark_ms).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn transcribe(app: tauri::AppHandle, path: String) -> Result<Vec<Segment>, String> {
+fn mark_moment(app: tauri::AppHandle) -> Result<(), String> {
+    add_mark(&app)
+}
+
+#[tauri::command]
+async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Result<Transcript, String> {
     // TODO: download the model on first launch instead of copying it by hand
     let model_path = app
         .path()
@@ -55,25 +94,57 @@ async fn transcribe(app: tauri::AppHandle, path: String) -> Result<Vec<Segment>,
 
     // whisper takes a while, so run it off the main thread to keep the window responsive
     let wav_path = PathBuf::from(&path);
-    let segments = tauri::async_runtime::spawn_blocking(move || {
+    let lines = tauri::async_runtime::spawn_blocking(move || {
         transcriber::transcribe(&model_path, &wav_path)
     })
     .await
     .map_err(|e| e.to_string())??;
 
+    let transcript = Transcript {
+        marks: marks::marked_ranges(&lines, &marks),
+        lines,
+    };
+
     // save the transcript next to the recording
-    let json = serde_json::to_string_pretty(&segments).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&transcript).map_err(|e| e.to_string())?;
     std::fs::write(PathBuf::from(&path).with_extension("json"), json).map_err(|e| e.to_string())?;
 
-    Ok(segments)
+    Ok(transcript)
+}
+
+// ⌥⌘M
+fn mark_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::ALT | Modifiers::SUPER), Code::KeyM)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state() == ShortcutState::Pressed && shortcut == &mark_shortcut() {
+                        // pressing it when not recording does nothing
+                        let _ = add_mark(app);
+                    }
+                })
+                .build(),
+        )
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start_recording, stop_recording, transcribe])
+        .setup(|app| {
+            // works even when Lecture isn't the front window
+            if let Err(error) = app.global_shortcut().register(mark_shortcut()) {
+                eprintln!("couldn't register the mark shortcut: {error}");
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            start_recording,
+            stop_recording,
+            mark_moment,
+            transcribe
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

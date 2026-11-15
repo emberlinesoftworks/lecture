@@ -1,13 +1,32 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 type Segment = {
   start_ms: number;
   end_ms: number;
   text: string;
+  pause_before_ms: number;
+};
+
+type MarkedRange = {
+  first_line: number;
+  last_line: number;
+  mark_ms: number;
+};
+
+type Transcript = {
+  lines: Segment[];
+  marks: MarkedRange[];
+};
+
+type StoppedRecording = {
+  path: string;
+  marks: number[];
 };
 
 const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
 const buttonLabel = recordButton.querySelector<HTMLElement>(".label")!;
+const markButton = document.querySelector<HTMLButtonElement>("#mark")!;
 const timer = document.querySelector<HTMLElement>("#timer")!;
 const statusText = document.querySelector<HTMLElement>("#status")!;
 const playback = document.querySelector<HTMLElement>("#playback")!;
@@ -16,6 +35,8 @@ const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
 
 let startTime = 0;
 let timerInterval: number | undefined;
+let markCount = 0;
+let audioContext: AudioContext | undefined;
 let segments: Segment[] = [];
 let lineButtons: HTMLButtonElement[] = [];
 let currentLine = -1;
@@ -33,11 +54,35 @@ function setRecording(isRecording: boolean) {
   recordButton.classList.toggle("recording", isRecording);
   recordButton.setAttribute("aria-pressed", String(isRecording));
   buttonLabel.textContent = isRecording ? "Stop" : "Record";
+  markButton.hidden = !isRecording;
 }
 
+// a quiet tick so you know the mark worked without looking at the screen
+function playTick() {
+  if (!audioContext) return;
+  const tone = audioContext.createOscillator();
+  const volume = audioContext.createGain();
+  const now = audioContext.currentTime;
+
+  tone.frequency.value = 880;
+  volume.gain.setValueAtTime(0.08, now);
+  volume.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+
+  tone.connect(volume).connect(audioContext.destination);
+  tone.start(now);
+  tone.stop(now + 0.12);
+}
+
+// fires for both the Mark button and the ⌥⌘M hotkey
+listen<number>("mark-added", (event) => {
+  markCount++;
+  playTick();
+  statusText.textContent = `Marked ${formatTime(event.payload)} (${markCount} ${markCount === 1 ? "mark" : "marks"})`;
+});
+
 // each line is a button, clicking it jumps the audio to when that was said
-function showTranscript(audioPath: string, newSegments: Segment[]) {
-  segments = newSegments;
+function showTranscript(audioPath: string, transcript: Transcript) {
+  segments = transcript.lines;
   lineButtons = [];
   currentLine = -1;
   transcriptList.replaceChildren();
@@ -59,6 +104,15 @@ function showTranscript(audioPath: string, newSegments: Segment[]) {
     transcriptList.append(item);
     lineButtons.push(line);
   });
+
+  // rust works out which lines each mark covers (see marks.rs)
+  for (const range of transcript.marks) {
+    for (let index = range.first_line; index <= range.last_line; index++) {
+      lineButtons[index].classList.add("in-mark");
+    }
+    lineButtons[range.first_line].classList.add("marked");
+    lineButtons[range.first_line].title = `You marked this at ${formatTime(range.mark_ms)}`;
+  }
 
   player.src = convertFileSrc(audioPath);
   playback.hidden = segments.length === 0;
@@ -85,16 +139,21 @@ player.addEventListener("timeupdate", () => {
   }
 });
 
-async function transcribe(path: string) {
+async function transcribe(path: string, marks: number[]) {
   statusText.textContent = "Transcribing...";
   const started = Date.now();
 
-  const newSegments = await invoke<Segment[]>("transcribe", { path });
+  const transcript = await invoke<Transcript>("transcribe", { path, marks });
 
   const seconds = Math.round((Date.now() - started) / 1000);
-  statusText.textContent = `Transcribed in ${seconds}s. Saved next to ${path}`;
-  showTranscript(path, newSegments);
+  const markNote = marks.length > 0 ? `, ${marks.length} marked` : "";
+  statusText.textContent = `Transcribed in ${seconds}s${markNote}. Saved next to ${path}`;
+  showTranscript(path, transcript);
 }
+
+markButton.addEventListener("click", () => {
+  invoke("mark_moment").catch((error) => (statusText.textContent = String(error)));
+});
 
 recordButton.addEventListener("click", async () => {
   const isRecording = recordButton.classList.contains("recording");
@@ -104,20 +163,24 @@ recordButton.addEventListener("click", async () => {
   try {
     if (isRecording) {
       // stop recording, then transcribe it
-      const savedPath = await invoke<string>("stop_recording");
+      const stopped = await invoke<StoppedRecording>("stop_recording");
       clearInterval(timerInterval);
       setRecording(false);
-      await transcribe(savedPath);
+      await transcribe(stopped.path, stopped.marks);
     } else {
+      // the tick sound needs this, and it has to be made after a click
+      audioContext ??= new AudioContext();
+
       // start recording and the timer
       player.pause();
       await invoke("start_recording");
       startTime = Date.now();
+      markCount = 0;
       timer.textContent = "00:00";
       timerInterval = setInterval(() => {
         timer.textContent = formatTime(Date.now() - startTime);
       }, 250);
-      statusText.textContent = "Recording";
+      statusText.textContent = "Recording. Press ⌥⌘M anytime to mark a moment";
       playback.hidden = true;
       setRecording(true);
     }

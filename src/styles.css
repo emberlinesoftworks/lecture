@@ -114,6 +114,48 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* mark button (only shows while recording) */
+.mark-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out);
+}
+
+.mark-button[hidden] {
+  display: none;
+}
+
+.mark-button:active {
+  transform: scale(0.97);
+}
+
+.mark-button:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 3px;
+}
+
+.mark-button kbd {
+  font: inherit;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mark-button:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+}
+
 /* playback + transcript */
 .playback {
   width: 100%;
@@ -153,6 +195,8 @@ body {
 
 .line time {
   color: var(--text-muted);
+  user-select: none;
+  -webkit-user-select: none;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   padding-top: 2px;
@@ -169,6 +213,28 @@ body {
 }
 
 .line.current time {
+  color: var(--accent-hot);
+}
+
+/* the stretch a mark covers gets a faint ember wash,
+   and its first line gets the dot */
+.line.in-mark {
+  background: rgba(255, 90, 31, 0.06);
+}
+
+/* lines you marked while recording get an ember dot */
+.line.marked time::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px 1px -12px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
+.line.marked time {
   color: var(--accent-hot);
 }
 
