@@ -1,48 +1,90 @@
 import { invoke } from "@tauri-apps/api/core";
 
-const recordBtn = document.querySelector<HTMLButtonElement>("#record")!;
-const label = recordBtn.querySelector<HTMLElement>(".label")!;
+type Segment = {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+};
+
+const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
+const buttonLabel = recordButton.querySelector<HTMLElement>(".label")!;
 const timer = document.querySelector<HTMLElement>("#timer")!;
-const status = document.querySelector<HTMLElement>("#status")!;
+const statusText = document.querySelector<HTMLElement>("#status")!;
+const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
 
-let startedAt = 0;
-let interval: number | undefined;
+let startTime = 0;
+let timerInterval: number | undefined;
 
-function formatTime(ms: number) {
-  const secs = Math.floor(ms / 1000);
-  const h = Math.floor(secs / 3600);
-  const m = String(Math.floor(secs / 60) % 60).padStart(2, "0");
-  const s = String(secs % 60).padStart(2, "0");
-  return h ? `${h}:${m}:${s}` : `${m}:${s}`;
+// turns milliseconds into 03:25 (or 1:03:25 once it passes an hour)
+function formatTime(milliseconds: number) {
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, "0");
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return hours > 0 ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
 }
 
-function setRecording(on: boolean) {
-  recordBtn.classList.toggle("recording", on);
-  recordBtn.setAttribute("aria-pressed", String(on));
-  label.textContent = on ? "Stop" : "Record";
+function setRecording(isRecording: boolean) {
+  recordButton.classList.toggle("recording", isRecording);
+  recordButton.setAttribute("aria-pressed", String(isRecording));
+  buttonLabel.textContent = isRecording ? "Stop" : "Record";
 }
 
-recordBtn.addEventListener("click", async () => {
-  const recording = recordBtn.classList.contains("recording");
-  recordBtn.disabled = true;
+function showTranscript(segments: Segment[]) {
+  transcriptList.replaceChildren();
+
+  for (const segment of segments) {
+    const line = document.createElement("li");
+    const time = document.createElement("time");
+    const text = document.createElement("span");
+
+    time.textContent = formatTime(segment.start_ms);
+    text.textContent = segment.text;
+
+    line.append(time, text);
+    transcriptList.append(line);
+  }
+  transcriptList.hidden = segments.length === 0;
+}
+
+async function transcribe(path: string) {
+  statusText.textContent = "Transcribing...";
+  const started = Date.now();
+
+  const segments = await invoke<Segment[]>("transcribe", { path });
+
+  const seconds = Math.round((Date.now() - started) / 1000);
+  statusText.textContent = `Transcribed in ${seconds}s. Saved next to ${path}`;
+  showTranscript(segments);
+}
+
+recordButton.addEventListener("click", async () => {
+  const isRecording = recordButton.classList.contains("recording");
+  // disable the button so it can't be double clicked while waiting on rust
+  recordButton.disabled = true;
 
   try {
-    if (recording) {
-      const path = await invoke<string>("stop_recording");
-      clearInterval(interval);
-      status.textContent = `Saved to ${path}`;
+    if (isRecording) {
+      // stop recording, then transcribe it
+      const savedPath = await invoke<string>("stop_recording");
+      clearInterval(timerInterval);
       setRecording(false);
+      await transcribe(savedPath);
     } else {
+      // start recording and the timer
       await invoke("start_recording");
-      startedAt = Date.now();
+      startTime = Date.now();
       timer.textContent = "00:00";
-      interval = setInterval(() => (timer.textContent = formatTime(Date.now() - startedAt)), 250);
-      status.textContent = "Recording";
+      timerInterval = setInterval(() => {
+        timer.textContent = formatTime(Date.now() - startTime);
+      }, 250);
+      statusText.textContent = "Recording";
+      transcriptList.hidden = true;
       setRecording(true);
     }
-  } catch (err) {
-    status.textContent = String(err);
+  } catch (error) {
+    statusText.textContent = String(error);
   } finally {
-    recordBtn.disabled = false;
+    recordButton.disabled = false;
   }
 });

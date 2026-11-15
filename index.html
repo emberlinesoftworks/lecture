@@ -8,13 +8,17 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <main class="recorder">
-      <p id="timer" class="timer" aria-live="off">00:00</p>
-      <button id="record" class="record" type="button" aria-pressed="false">
-        <span class="dot" aria-hidden="true"></span>
-        <span class="label">Record</span>
-      </button>
-      <p id="status" class="status" role="status"></p>
+    <main class="app">
+      <section class="recorder">
+        <p id="timer" class="timer">00:00</p>
+        <button id="record" class="record" type="button" aria-pressed="false">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="label">Record</span>
+        </button>
+        <p id="status" class="status" role="status"></p>
+      </section>
+
+      <ol id="transcript" class="transcript" hidden></ol>
     </main>
   </body>
 </html>
