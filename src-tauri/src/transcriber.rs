@@ -1,9 +1,19 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
+    WhisperVadContextParams, WhisperVadParams,
+};
+
+use crate::silence::{original_ms, squeeze_silence};
 
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
+
+// the voice detector that finds where people are talking (about 1 MB).
+// it sits next to the speech model, and if it's missing we just transcribe everything
+pub const VOICE_MODEL_FILE: &str = "ggml-silero-v5.1.2.bin";
 
 // a silence this long between words starts a new line
 const PAUSE_BREAK_MS: i64 = 500;
@@ -32,6 +42,7 @@ pub fn transcribe(model_path: &Path, wav_path: &Path) -> Result<Vec<Segment>, St
 // keeps the model loaded so it can transcribe piece after piece during a class
 pub struct Transcriber {
     context: WhisperContext,
+    voice_detector: Option<Mutex<WhisperVadContext>>,
 }
 
 impl Transcriber {
@@ -39,13 +50,14 @@ impl Transcriber {
     pub fn load(model_path: &Path) -> Result<Self, String> {
         let context = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
             .map_err(|e| format!("couldn't load model: {e}"))?;
-        Ok(Self { context })
+        let voice_detector = load_voice_detector(&model_path.with_file_name(VOICE_MODEL_FILE));
+        Ok(Self { context, voice_detector })
     }
 
     // turns 16k mono audio into lines. start_ms is where this audio
     // begins in the recording, so the times line up with the whole file
     pub fn transcribe_audio(&self, audio: &[f32], start_ms: i64) -> Result<Vec<Segment>, String> {
-        let mut lines = transcribe_audio(&self.context, audio)?;
+        let mut lines = transcribe_audio(&self.context, self.voice_detector.as_ref(), audio)?;
         for line in &mut lines {
             line.start_ms += start_ms;
             line.end_ms += start_ms;
@@ -54,7 +66,54 @@ impl Transcriber {
     }
 }
 
-fn transcribe_audio(context: &WhisperContext, audio: &[f32]) -> Result<Vec<Segment>, String> {
+fn load_voice_detector(path: &Path) -> Option<Mutex<WhisperVadContext>> {
+    let path = path.to_str()?;
+    if !Path::new(path).exists() {
+        return None;
+    }
+    let mut params = WhisperVadContextParams::new();
+    params.set_n_threads(2);
+    // it's tiny, the cpu is plenty and leaves the gpu for whisper
+    params.set_use_gpu(false);
+    WhisperVadContext::new(path, params).ok().map(Mutex::new)
+}
+
+// where people are talking, as (start, end) sample positions.
+// None means we couldn't tell, so transcribe all of it
+fn find_speech(voice_detector: &Mutex<WhisperVadContext>, audio: &[f32]) -> Option<Vec<(usize, usize)>> {
+    let mut params = WhisperVadParams::new();
+    params.set_threshold(0.5);
+    params.set_min_speech_duration(250);
+    params.set_min_silence_duration(500);
+    // a bit of room around each bit of talking so first and last words don't get clipped
+    params.set_speech_pad(200);
+
+    let mut detector = voice_detector.lock().ok()?;
+    let segments = detector.segments_from_samples(params, audio).ok()?;
+
+    // the detector gives centiseconds, 160 samples each at 16k
+    let samples_per_cs = WHISPER_SAMPLE_RATE as f32 / 100.0;
+    let speech = segments
+        .map(|segment| ((segment.start * samples_per_cs) as usize, (segment.end * samples_per_cs) as usize))
+        .collect();
+    Some(speech)
+}
+
+fn transcribe_audio(
+    context: &WhisperContext,
+    voice_detector: Option<&Mutex<WhisperVadContext>>,
+    audio: &[f32],
+) -> Result<Vec<Segment>, String> {
+    // cut long silences down before whisper sees the audio.
+    // the times get mapped back to the real recording below
+    let speech = voice_detector.and_then(|detector| find_speech(detector, audio));
+    let (squeezed, pieces) = match &speech {
+        Some(speech) if speech.is_empty() => return Ok(Vec::new()),  // nobody talking, nothing to do
+        Some(speech) => squeeze_silence(audio, speech),
+        None => (audio.to_vec(), Vec::new()),
+    };
+    let to_recording_time = |ms: i64| if pieces.is_empty() { ms } else { original_ms(&pieces, ms) };
+
     let mut state = context.create_state().map_err(|e| e.to_string())?;
 
     // same settings we tested with whisper-cli: english, beam search of 5
@@ -66,7 +125,7 @@ fn transcribe_audio(context: &WhisperContext, audio: &[f32]) -> Result<Vec<Segme
     params.set_print_timestamps(false);
     params.set_print_special(false);
 
-    state.full(params, audio).map_err(|e| format!("transcription failed: {e}"))?;
+    state.full(params, &squeezed).map_err(|e| format!("transcription failed: {e}"))?;
 
     // collect every word piece with its timing
     let mut tokens = Vec::new();
@@ -82,7 +141,11 @@ fn transcribe_audio(context: &WhisperContext, audio: &[f32]) -> Result<Vec<Segme
 
             // whisper gives timestamps in centiseconds, convert to milliseconds
             let timing = token.token_data();
-            tokens.push(Token { text, start_ms: timing.t0 * 10, end_ms: timing.t1 * 10 });
+            tokens.push(Token {
+                text,
+                start_ms: to_recording_time(timing.t0 * 10),
+                end_ms: to_recording_time(timing.t1 * 10),
+            });
         }
     }
 

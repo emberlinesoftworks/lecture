@@ -2,6 +2,7 @@ pub mod lectures;
 pub mod live;
 pub mod marks;
 mod recorder;
+pub mod silence;
 pub mod transcriber;
 
 use std::path::PathBuf;
