@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lecture",
+  "productName": "Lecture",
   "version": "0.1.0",
   "identifier": "com.emberlinesoftworks.lecture",
   "build": {
@@ -13,13 +13,19 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "lecture",
-        "width": 800,
-        "height": 600
+        "title": "Lecture",
+        "width": 900,
+        "height": 700
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$DOCUMENT/Lecture/**"
+        ]
+      }
     }
   },
   "bundle": {

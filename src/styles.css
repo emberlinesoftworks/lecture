@@ -114,29 +114,68 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* transcript */
-.transcript {
+/* playback + transcript */
+.playback {
   width: 100%;
   max-width: 680px;
-  margin: 40px 0 0;
-  padding: 24px 0 0;
+  margin-top: 40px;
+  padding-top: 24px;
   border-top: 1px solid var(--line);
+}
+
+.playback audio {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.transcript {
+  margin: 0;
+  padding: 0;
   list-style: none;
 }
 
-.transcript li {
+.line {
   display: grid;
   grid-template-columns: 64px 1fr;
   gap: 16px;
-  padding: 6px 0;
+  width: 100%;
+  padding: 6px 12px 6px 10px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0 6px 6px 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
   line-height: 1.55;
+  text-align: left;
+  cursor: pointer;
 }
 
-.transcript time {
+.line time {
   color: var(--text-muted);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   padding-top: 2px;
+}
+
+.line:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 1px;
+}
+
+.line.current {
+  border-left-color: var(--accent);
+  background: #1a0f0c;
+}
+
+.line.current time {
+  color: var(--accent-hot);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .line:hover {
+    background: #160d0b;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

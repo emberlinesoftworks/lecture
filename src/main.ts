@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 type Segment = {
   start_ms: number;
@@ -10,10 +10,15 @@ const recordButton = document.querySelector<HTMLButtonElement>("#record")!;
 const buttonLabel = recordButton.querySelector<HTMLElement>(".label")!;
 const timer = document.querySelector<HTMLElement>("#timer")!;
 const statusText = document.querySelector<HTMLElement>("#status")!;
+const playback = document.querySelector<HTMLElement>("#playback")!;
+const player = document.querySelector<HTMLAudioElement>("#player")!;
 const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
 
 let startTime = 0;
 let timerInterval: number | undefined;
+let segments: Segment[] = [];
+let lineButtons: HTMLButtonElement[] = [];
+let currentLine = -1;
 
 // turns milliseconds into 03:25 (or 1:03:25 once it passes an hour)
 function formatTime(milliseconds: number) {
@@ -30,32 +35,65 @@ function setRecording(isRecording: boolean) {
   buttonLabel.textContent = isRecording ? "Stop" : "Record";
 }
 
-function showTranscript(segments: Segment[]) {
+// each line is a button, clicking it jumps the audio to when that was said
+function showTranscript(audioPath: string, newSegments: Segment[]) {
+  segments = newSegments;
+  lineButtons = [];
+  currentLine = -1;
   transcriptList.replaceChildren();
 
-  for (const segment of segments) {
-    const line = document.createElement("li");
+  segments.forEach((segment, index) => {
+    const item = document.createElement("li");
+    const line = document.createElement("button");
     const time = document.createElement("time");
     const text = document.createElement("span");
 
+    line.type = "button";
+    line.className = "line";
     time.textContent = formatTime(segment.start_ms);
     text.textContent = segment.text;
-
     line.append(time, text);
-    transcriptList.append(line);
-  }
-  transcriptList.hidden = segments.length === 0;
+    line.addEventListener("click", () => playFrom(index));
+
+    item.append(line);
+    transcriptList.append(item);
+    lineButtons.push(line);
+  });
+
+  player.src = convertFileSrc(audioPath);
+  playback.hidden = segments.length === 0;
 }
+
+function playFrom(index: number) {
+  player.currentTime = segments[index].start_ms / 1000;
+  player.play();
+}
+
+// highlight whichever line is playing right now
+player.addEventListener("timeupdate", () => {
+  const nowMs = player.currentTime * 1000;
+  const playing = segments.findIndex((segment) => nowMs >= segment.start_ms && nowMs < segment.end_ms);
+  if (playing === currentLine) return;
+
+  lineButtons[currentLine]?.classList.remove("current");
+  currentLine = playing;
+
+  const line = lineButtons[currentLine];
+  if (line) {
+    line.classList.add("current");
+    line.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+});
 
 async function transcribe(path: string) {
   statusText.textContent = "Transcribing...";
   const started = Date.now();
 
-  const segments = await invoke<Segment[]>("transcribe", { path });
+  const newSegments = await invoke<Segment[]>("transcribe", { path });
 
   const seconds = Math.round((Date.now() - started) / 1000);
   statusText.textContent = `Transcribed in ${seconds}s. Saved next to ${path}`;
-  showTranscript(segments);
+  showTranscript(path, newSegments);
 }
 
 recordButton.addEventListener("click", async () => {
@@ -72,6 +110,7 @@ recordButton.addEventListener("click", async () => {
       await transcribe(savedPath);
     } else {
       // start recording and the timer
+      player.pause();
       await invoke("start_recording");
       startTime = Date.now();
       timer.textContent = "00:00";
@@ -79,7 +118,7 @@ recordButton.addEventListener("click", async () => {
         timer.textContent = formatTime(Date.now() - startTime);
       }, 250);
       statusText.textContent = "Recording";
-      transcriptList.hidden = true;
+      playback.hidden = true;
       setRecording(true);
     }
   } catch (error) {
