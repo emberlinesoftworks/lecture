@@ -143,6 +143,18 @@ fn add_mark(app: &tauri::AppHandle) -> Result<(), String> {
     app.emit("mark-added", mark_ms).map_err(|e| e.to_string())
 }
 
+// the window asks for this a few times a second to draw the level meter
+#[tauri::command]
+fn mic_level(state: State<AppState>) -> f32 {
+    state
+        .recording
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|active| active.recording.level())
+        .unwrap_or(0.0)
+}
+
 #[tauri::command]
 fn mark_moment(app: tauri::AppHandle) -> Result<(), String> {
     add_mark(&app)
@@ -226,6 +238,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             mark_moment,
+            mic_level,
             transcribe,
             list_lectures,
             open_lecture,

@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -19,6 +20,8 @@ struct Output {
     downsampler: Downsampler,
     // a copy of the audio for transcribing during class
     pending: Option<PendingAudio>,
+    // how loud the mic is right now, for the level meter
+    level: Arc<AtomicU32>,
 }
 
 type SharedOutput = Arc<Mutex<Option<Output>>>;
@@ -30,6 +33,7 @@ pub struct Recording {
     recording_thread: JoinHandle<Result<PathBuf, String>>,
     started_at: Instant,
     marks: Vec<u64>,
+    level: Arc<AtomicU32>,
 }
 
 impl Recording {
@@ -37,7 +41,10 @@ impl Recording {
     pub fn start(path: PathBuf, pending: PendingAudio) -> Result<Self, String> {
         let (stop_sender, stop_receiver) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::channel();
-        let recording_thread = thread::spawn(move || record(path, pending, stop_receiver, ready_sender));
+        let level = Arc::new(AtomicU32::new(0));
+        let thread_level = level.clone();
+        let recording_thread =
+            thread::spawn(move || record(path, pending, thread_level, stop_receiver, ready_sender));
 
         // wait until the mic is actually open before saying we're recording
         match ready_receiver.recv() {
@@ -46,6 +53,7 @@ impl Recording {
                 recording_thread,
                 started_at: Instant::now(),
                 marks: Vec::new(),
+                level,
             }),
             Ok(Err(error)) => {
                 let _ = recording_thread.join();
@@ -53,6 +61,11 @@ impl Recording {
             }
             Err(_) => Err("recording thread exited early".into()),
         }
+    }
+
+    // 0.0 to 1.0, how loud the mic was in the last little bit of audio
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
     // saves how far into the recording we are, in milliseconds
@@ -75,10 +88,11 @@ impl Recording {
 fn record(
     path: PathBuf,
     pending: PendingAudio,
+    level: Arc<AtomicU32>,
     stop_receiver: mpsc::Receiver<()>,
     ready_sender: mpsc::Sender<Result<(), String>>,
 ) -> Result<PathBuf, String> {
-    let (stream, output) = match open_mic(&path, pending) {
+    let (stream, output) = match open_mic(&path, pending, level) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = ready_sender.send(Err(error.clone()));
@@ -98,7 +112,11 @@ fn record(
     Ok(path)
 }
 
-fn open_mic(path: &PathBuf, pending: PendingAudio) -> Result<(cpal::Stream, SharedOutput), String> {
+fn open_mic(
+    path: &PathBuf,
+    pending: PendingAudio,
+    level: Arc<AtomicU32>,
+) -> Result<(cpal::Stream, SharedOutput), String> {
     let device = cpal::default_host()
         .default_input_device()
         .ok_or("No microphone found")?;
@@ -122,6 +140,7 @@ fn open_mic(path: &PathBuf, pending: PendingAudio) -> Result<(cpal::Stream, Shar
         downsampler: Downsampler::new(mic_rate, save_rate),
         // whisper needs 16k, so a (very unusual) slower mic gets transcribed from the file instead
         pending: (save_rate == SAVE_RATE).then_some(pending),
+        level,
     })));
 
     let stream_writer = output.clone();
@@ -170,6 +189,10 @@ fn write_mono<T: Copy>(
             new_samples.push(sample);
         }
     }
+
+    // loudest sample in this bit of audio, for the level meter
+    let loudest = new_samples.iter().fold(0.0f32, |loudest, sample| loudest.max(sample.abs()));
+    output.level.store(loudest.to_bits(), Ordering::Relaxed);
 
     // hand the new audio to the live transcriber all at once
     if let Some(pending) = &output.pending {

@@ -8,17 +8,43 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <div class="layout">
-      <aside class="sidebar">
-        <input
-          id="search"
-          class="search"
-          type="search"
-          placeholder="Search all lectures"
-          aria-label="Search all lectures"
-          autocomplete="off"
-          spellcheck="false"
-        />
+    <!-- the title bar is hidden, so this strip is what you drag the window by -->
+    <div class="drag-bar" data-tauri-drag-region></div>
+
+    <!-- only shows when the sidebar is hidden, just right of the traffic lights -->
+    <button id="expand" class="icon-button expand-button" type="button" aria-label="Show sidebar" title="Show sidebar (⌘\)" hidden>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5 12.5 10l-5 5" /></svg>
+    </button>
+
+    <div id="layout" class="layout">
+      <aside id="sidebar" class="sidebar">
+        <header class="sidebar-header" data-tauri-drag-region>
+          <svg class="brand-mark" viewBox="16 16 66 68" aria-hidden="true">
+            <rect x="16" y="16" width="14" height="68" />
+            <rect x="16" y="16" width="66" height="14" />
+            <rect x="16" y="70" width="66" height="14" />
+            <rect class="brand-spark-bar" x="37" y="43" width="29" height="14" />
+            <rect class="brand-spark" x="72" y="35" width="10" height="10" />
+          </svg>
+          <span class="brand-name">Lecture</span>
+          <button id="collapse" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar (⌘\)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 5 7.5 10l5 5" /></svg>
+          </button>
+        </header>
+
+        <label class="search-box">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="5.5" /><path d="m13 13 3.5 3.5" /></svg>
+          <input
+            id="search"
+            class="search"
+            type="search"
+            placeholder="Search all lectures"
+            aria-label="Search all lectures"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+
         <ul id="lecture-list" class="lecture-list"></ul>
         <ul id="search-results" class="search-results" hidden></ul>
         <p id="sidebar-empty" class="sidebar-empty" hidden></p>
@@ -27,6 +53,7 @@
       <main class="app">
         <section class="recorder">
           <p id="timer" class="timer">00:00</p>
+          <div id="meter" class="meter" aria-hidden="true"></div>
           <button id="record" class="record" type="button" aria-pressed="false">
             <span class="dot" aria-hidden="true"></span>
             <span class="label">Record</span>
@@ -34,7 +61,7 @@
           <button id="mark" class="mark-button" type="button" hidden>
             Mark this moment <kbd>⌥⌘M</kbd>
           </button>
-          <p id="status" class="status" role="status"></p>
+          <p id="status" class="status" role="status">Press Record when class starts. ⌥⌘M marks a moment from any app.</p>
           <p id="progress" class="progress"></p>
         </section>
 
@@ -43,7 +70,34 @@
             <h2 id="lecture-title" class="lecture-title"></h2>
             <button id="export" class="export-button" type="button">Export</button>
           </div>
-          <audio id="player" controls preload="metadata"></audio>
+          <audio id="player" preload="metadata"></audio>
+          <div class="player-bar">
+            <button id="back" class="player-skip" type="button" aria-label="Back 15 seconds" title="Back 15 seconds">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" />
+                <path d="M6.7 2.8v3.9h3.9" />
+                <text x="12" y="15.4">15</text>
+              </svg>
+            </button>
+            <button id="play" class="player-play" type="button" aria-label="Play">
+              <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg>
+              <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="4" height="14" rx="1" /><rect x="13.5" y="5" width="4" height="14" rx="1" /></svg>
+            </button>
+            <button id="forward" class="player-skip" type="button" aria-label="Forward 15 seconds" title="Forward 15 seconds">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
+                <path d="M17.3 2.8v3.9h-3.9" />
+                <text x="12" y="15.4">15</text>
+              </svg>
+            </button>
+            <span id="current-time" class="player-time">00:00</span>
+            <div class="scrubber">
+              <input id="scrub" type="range" min="0" max="0" step="0.1" value="0" aria-label="Seek" />
+              <div id="scrub-marks" class="scrub-marks"></div>
+            </div>
+            <span id="total-time" class="player-time">00:00</span>
+            <button id="speed" class="player-speed" type="button" aria-label="Playback speed" title="Playback speed">1×</button>
+          </div>
           <ol id="transcript" class="transcript"></ol>
         </section>
       </main>

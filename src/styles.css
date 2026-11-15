@@ -1,16 +1,41 @@
+/* Same fonts as emberlinesoftworks.com, bundled with the app (no internet needed).
+   Both are SIL Open Font License, see assets/fonts/OFL-*.txt */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("./assets/fonts/bricolage-grotesque.woff2") format("woff2");
+  font-weight: 300 800;
+}
+
+@font-face {
+  font-family: "Tektur";
+  src: url("./assets/fonts/tektur.woff2") format("woff2");
+  font-weight: 400 900;
+  font-stretch: 75% 100%;
+}
+
 :root {
   --bg: #0b0605;
+  --bg-elevated: #130a08;
+  --bg-elevated-2: #1b0e0c;
   --line: #2a1714;
+  --line-strong: #45251f;
   --text: #f6ebe4;
   --text-muted: #a99089;
+  --text-faint: #957f78;
   --accent: #ff5a1f;
   --accent-hot: #ffa02e;
+  --text-on-accent: #170605;
+
+  --font-body: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --font-display: "Tektur", var(--font-body);
+
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --sidebar-width: 272px;
 
   color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  scrollbar-color: var(--line-strong) transparent;
+  caret-color: var(--accent);
+  accent-color: var(--accent);
 }
 
 * {
@@ -19,285 +44,192 @@
 
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 350;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 2px;
+}
+
+/* the window has no title bar, this invisible strip is what you drag */
+.drag-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 5;
+  height: 38px;
 }
 
 /* sidebar on the left, recorder and transcript on the right */
 .layout {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: var(--sidebar-width) 1fr;
   height: 100vh;
+  transition: grid-template-columns 280ms var(--ease-out);
 }
 
-.app {
+.layout.collapsed {
+  grid-template-columns: 0 1fr;
+}
+
+/* --- sidebar --- */
+
+.sidebar {
+  position: relative;
+  z-index: 6;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 48px 32px;
-  overflow-y: auto;
+  gap: 14px;
+  min-width: 0;
+  padding: 0 12px 20px;
+  overflow: hidden auto;
+  border-right: 1px solid var(--line);
+  background: var(--bg-elevated);
 }
 
-.recorder {
+.layout.collapsed .sidebar {
+  visibility: hidden;
+  border-right-color: transparent;
+}
+
+/* leaves room for the window's traffic light buttons */
+.sidebar-header {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 28px;
-  user-select: none;
-  -webkit-user-select: none;
+  gap: 10px;
+  min-width: calc(var(--sidebar-width) - 24px);
+  padding: 46px 4px 4px;
 }
 
-.timer {
-  margin: 0;
-  font-size: 56px;
-  font-weight: 300;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
+.brand-mark {
+  width: 20px;
+  height: 20px;
+  fill: var(--text);
 }
 
-.record {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 32px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #160d0b;
-  color: var(--text);
-  font: inherit;
-  font-size: 18px;
+.brand-mark .brand-spark-bar {
+  fill: var(--accent);
+}
+
+.brand-mark .brand-spark {
+  fill: var(--accent-hot);
+}
+
+.brand-name {
+  flex: 1;
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-muted);
   cursor: pointer;
   transition:
-    transform 160ms var(--ease-out),
-    border-color 160ms var(--ease-out);
+    color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out),
+    transform 160ms var(--ease-out);
 }
 
-.record:active {
-  transform: scale(0.97);
+.icon-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.record:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.record:focus-visible {
-  outline: 2px solid var(--accent-hot);
-  outline-offset: 3px;
+.icon-button:active {
+  transform: scale(0.94);
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .record:hover {
-    border-color: var(--accent);
+  .icon-button:hover {
+    color: var(--text);
+    border-color: var(--line-strong);
   }
 }
 
-.dot {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--accent);
-  transition: border-radius 160ms var(--ease-out);
+/* sits just right of the traffic lights when the sidebar is hidden */
+.expand-button {
+  position: fixed;
+  top: 9px;
+  left: 82px;
+  z-index: 7;
 }
 
-.record.recording .dot {
-  border-radius: 3px;
-  animation: ember 1.6s ease-in-out infinite;
-}
-
-@keyframes ember {
-  50% {
-    background: var(--accent-hot);
-    box-shadow: 0 0 12px var(--accent);
-  }
-}
-
-.status {
-  margin: 0;
-  min-height: 1.4em;
-  max-width: 520px;
-  color: var(--text-muted);
-  font-size: 13px;
-  text-align: center;
-  overflow-wrap: anywhere;
-}
-
-.progress {
-  margin: -16px 0 0;
-  min-height: 1.4em;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.8;
-}
-
-/* mark button (only shows while recording) */
-.mark-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: none;
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 14px;
-  cursor: pointer;
-  transition: transform 160ms var(--ease-out);
-}
-
-.mark-button[hidden] {
+.expand-button[hidden] {
   display: none;
 }
 
-.mark-button:active {
-  transform: scale(0.97);
+.search-box {
+  position: relative;
+  display: block;
+  min-width: calc(var(--sidebar-width) - 24px);
 }
 
-.mark-button:focus-visible {
-  outline: 2px solid var(--accent-hot);
-  outline-offset: 3px;
-}
-
-.mark-button kbd {
-  font: inherit;
-  font-size: 12px;
-  opacity: 0.7;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .mark-button:hover {
-    color: var(--text);
-    border-color: var(--accent);
-  }
-}
-
-/* playback + transcript */
-.playback {
-  width: 100%;
-  max-width: 680px;
-  margin-top: 40px;
-  padding-top: 24px;
-  border-top: 1px solid var(--line);
-}
-
-.playback audio {
-  width: 100%;
-  margin-bottom: 16px;
-}
-
-.transcript {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.line {
-  display: grid;
-  grid-template-columns: 64px 1fr;
-  gap: 16px;
-  width: 100%;
-  padding: 6px 12px 6px 10px;
-  border: 0;
-  border-left: 2px solid transparent;
-  border-radius: 0 6px 6px 0;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  line-height: 1.55;
-  text-align: left;
-  cursor: pointer;
-}
-
-.line time {
-  color: var(--text-muted);
-  user-select: none;
-  -webkit-user-select: none;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-  padding-top: 2px;
-}
-
-.line:focus-visible {
-  outline: 2px solid var(--accent-hot);
-  outline-offset: 1px;
-}
-
-.line.current {
-  border-left-color: var(--accent);
-  background: #1a0f0c;
-}
-
-.line.current time {
-  color: var(--accent-hot);
-}
-
-/* the stretch a mark covers gets a faint ember wash,
-   and its first line gets the dot */
-.line.in-mark {
-  background: rgba(255, 90, 31, 0.06);
-}
-
-/* lines you marked while recording get an ember dot */
-.line.marked time::before {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin: 0 6px 1px -12px;
-  border-radius: 50%;
-  background: var(--accent);
-  vertical-align: middle;
-}
-
-.line.marked time {
-  color: var(--accent-hot);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .line:hover {
-    background: #160d0b;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .record.recording .dot {
-    animation: none;
-  }
-}
-
-.line.in-mark.current {
-  background: #1a0f0c;
-}
-
-/* sidebar */
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 20px 12px;
-  border-right: 1px solid var(--line);
-  overflow-y: auto;
+.search-box svg {
+  position: absolute;
+  top: 50%;
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  pointer-events: none;
 }
 
 .search {
   width: 100%;
-  padding: 8px 12px;
+  padding: 9px 12px 9px 34px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #160d0b;
+  border-radius: 9px;
+  background: var(--bg);
   color: var(--text);
   font: inherit;
   font-size: 14px;
+  transition: border-color 160ms var(--ease-out);
 }
 
 .search::placeholder {
-  color: #957f78;
+  color: var(--text-faint);
 }
 
 .search:focus-visible {
-  outline: 2px solid var(--accent-hot);
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 90, 31, 0.18);
 }
 
 .lecture-list,
@@ -305,6 +237,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: calc(var(--sidebar-width) - 24px);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -323,34 +256,32 @@ body {
   width: 100%;
   padding: 10px 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 9px;
   background: none;
-  color: var(--text);
-  font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background 160ms var(--ease-out);
 }
 
 .lecture-item.open {
-  background: #1a0f0c;
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--bg-elevated-2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 .lecture-item:focus-visible,
 .search-hit:focus-visible {
-  outline: 2px solid var(--accent-hot);
   outline-offset: -2px;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .lecture-item:hover,
   .search-hit:hover {
-    background: #160d0b;
+    background: var(--bg-elevated-2);
   }
 }
 
 .lecture-date {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -363,9 +294,12 @@ body {
 }
 
 .lecture-details {
-  color: var(--text-muted);
-  font-size: 12px;
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-stretch: 82%;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
 }
 
 .search-text {
@@ -375,57 +309,585 @@ body {
 }
 
 .search-text mark {
-  border-radius: 2px;
-  background: rgba(255, 90, 31, 0.25);
+  border-radius: 3px;
+  background: rgba(255, 90, 31, 0.24);
   color: var(--text);
 }
 
 .sidebar-empty {
-  margin: 8px 12px;
-  color: var(--text-muted);
+  min-width: calc(var(--sidebar-width) - 24px);
+  margin: 4px 12px;
+  color: var(--text-faint);
   font-size: 13px;
   line-height: 1.5;
 }
 
-/* title and export above the player */
+/* --- main area --- */
+
+.app {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  padding: 64px 40px 48px;
+  overflow-y: auto;
+}
+
+.app > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* --- recorder --- */
+
+.recorder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  padding-top: 24px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.timer {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(64px, 9vw, 104px);
+  font-weight: 500;
+  font-stretch: 88%;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  transition: color 300ms var(--ease-out);
+}
+
+.recording-active .timer {
+  color: var(--accent-hot);
+}
+
+/* mic level as a row of thin embers, newest on the right */
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 36px;
+}
+
+.meter span {
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(to top, var(--accent), var(--accent-hot));
+  opacity: 0.18;
+  transform: scaleY(0.08);
+  transition:
+    transform 90ms linear,
+    opacity 200ms var(--ease-out);
+}
+
+.recording-active .meter span {
+  opacity: 0.9;
+}
+
+.record {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 15px 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: linear-gradient(to bottom, var(--bg-elevated-2), var(--bg-elevated));
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    transform 160ms var(--ease-out),
+    border-color 200ms var(--ease-out),
+    box-shadow 300ms var(--ease-out);
+}
+
+.record:active {
+  transform: scale(0.97);
+}
+
+.record:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.record:focus-visible {
+  outline-offset: 4px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .record:hover {
+    border-color: var(--accent);
+  }
+}
+
+.record.recording {
+  border-color: var(--accent);
+  background: #24100b;
+  box-shadow: 0 12px 28px -12px rgba(0, 0, 0, 0.7);
+}
+
+.dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: border-radius 200ms var(--ease-out);
+}
+
+.record.recording .dot {
+  border-radius: 3px;
+  animation: ember 1.6s ease-in-out infinite;
+}
+
+@keyframes ember {
+  50% {
+    background: var(--accent-hot);
+  }
+}
+
+.mark-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    transform 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
+}
+
+.mark-button[hidden] {
+  display: none;
+}
+
+.mark-button:active {
+  transform: scale(0.97);
+}
+
+.mark-button kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-stretch: 85%;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mark-button:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+}
+
+.status {
+  max-width: 520px;
+  min-height: 1.4em;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.progress {
+  min-height: 1.4em;
+  margin: -14px 0 0;
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-stretch: 85%;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+}
+
+/* --- playback + transcript --- */
+
+.playback {
+  width: 100%;
+  max-width: 720px;
+  margin-top: 44px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line);
+}
+
+/* small crosses where the line ends, like on the website */
+.playback::before,
+.playback::after {
+  content: "";
+  position: absolute;
+  top: -6px;
+  width: 11px;
+  height: 11px;
+  background:
+    linear-gradient(var(--text-muted), var(--text-muted)) center / 1px 100% no-repeat,
+    linear-gradient(var(--text-muted), var(--text-muted)) center / 100% 1px no-repeat;
+  opacity: 0.6;
+}
+
+.playback::before {
+  left: -6px;
+}
+
+.playback::after {
+  right: -6px;
+}
+
 .playback-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .lecture-title {
   margin: 0;
-  font-size: 16px;
-  font-weight: 500;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  font-stretch: 90%;
+  letter-spacing: 0.01em;
 }
 
 .export-button {
   padding: 6px 14px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
   background: none;
   color: var(--text-muted);
-  font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: transform 160ms var(--ease-out);
+  transition:
+    transform 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
 }
 
 .export-button:active {
   transform: scale(0.97);
 }
 
-.export-button:focus-visible {
-  outline: 2px solid var(--accent-hot);
-  outline-offset: 3px;
-}
-
 @media (hover: hover) and (pointer: fine) {
   .export-button:hover {
     color: var(--text);
     border-color: var(--accent);
+  }
+}
+
+/* --- play bar --- */
+
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 8px 14px 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 90, 31, 0.04), transparent 60%),
+    var(--bg-elevated);
+  box-shadow: inset 0 1px 0 rgba(255, 235, 228, 0.03);
+}
+
+.player-play,
+.player-skip,
+.player-speed {
+  flex: none;
+  border: 0;
+  cursor: pointer;
+  transition:
+    transform 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    background-color 160ms var(--ease-out),
+    box-shadow 200ms var(--ease-out);
+}
+
+.player-play:active,
+.player-skip:active,
+.player-speed:active {
+  transform: scale(0.94);
+}
+
+.player-play {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.player-play svg {
+  grid-area: 1 / 1;
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.player-play .icon-pause,
+.player-play.playing .icon-play {
+  display: none;
+}
+
+.player-play.playing .icon-pause {
+  display: block;
+}
+
+.player-play.playing {
+  box-shadow: 0 8px 18px -8px rgba(0, 0, 0, 0.8);
+}
+
+.player-skip {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+}
+
+.player-skip svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.player-skip text {
+  fill: currentColor;
+  stroke: none;
+  font-family: var(--font-display);
+  font-size: 8.5px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.player-time {
+  flex: none;
+  min-width: 42px;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-stretch: 88%;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.scrubber {
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+  height: 28px;
+}
+
+.scrubber input {
+  --progress: 0%;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  background: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.scrubber input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, var(--accent), var(--accent-hot)) 0 0 / var(--progress) 100% no-repeat,
+    var(--line-strong);
+}
+
+.scrubber input::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+  transition: transform 160ms var(--ease-out);
+  -webkit-appearance: none;
+}
+
+.scrubber input:active::-webkit-slider-thumb {
+  transform: scale(1.2);
+}
+
+.scrubber input:focus-visible {
+  outline: none;
+}
+
+.scrubber input:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 2px;
+}
+
+/* the marks sit on top of the track but only the ticks take clicks */
+.scrub-marks {
+  position: absolute;
+  inset: 0 7px;
+  pointer-events: none;
+}
+
+.scrub-mark {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+}
+
+.scrub-mark::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 5px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent-hot);
+  transition: transform 160ms var(--ease-out);
+}
+
+.player-speed {
+  min-width: 52px;
+  padding: 5px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .player-skip:hover,
+  .player-speed:hover {
+    color: var(--text);
+    background: var(--bg-elevated-2);
+  }
+
+  .player-play:hover {
+    background: #ff6b33;
+  }
+
+  .scrub-mark:hover::before {
+    transform: scaleY(1.35);
+  }
+}
+
+.transcript {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 16px;
+  width: 100%;
+  padding: 7px 12px 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font-size: 15.5px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms var(--ease-out);
+}
+
+.line time {
+  padding-top: 3px;
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-stretch: 85%;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.line:focus-visible {
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .line:hover {
+    background: var(--bg-elevated);
+  }
+}
+
+/* the stretch a mark covers gets a faint ember wash,
+   and its first line gets the dot */
+.line.in-mark {
+  background: rgba(255, 90, 31, 0.06);
+}
+
+.line.marked time {
+  color: var(--accent-hot);
+}
+
+.line.marked time::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px 1px -12px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
+/* whatever is playing right now */
+.line.current,
+.line.in-mark.current {
+  background: rgba(255, 90, 31, 0.15);
+}
+
+.line.current time {
+  color: var(--accent-hot);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .record.recording .dot {
+    animation: none;
+  }
+
+  .layout,
+  .meter span {
+    transition: none;
   }
 }

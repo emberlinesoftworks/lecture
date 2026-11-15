@@ -53,10 +53,22 @@ const lectureTitle = document.querySelector<HTMLElement>("#lecture-title")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#export")!;
 const player = document.querySelector<HTMLAudioElement>("#player")!;
 const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
+const playButton = document.querySelector<HTMLButtonElement>("#play")!;
+const backButton = document.querySelector<HTMLButtonElement>("#back")!;
+const forwardButton = document.querySelector<HTMLButtonElement>("#forward")!;
+const scrubber = document.querySelector<HTMLInputElement>("#scrub")!;
+const scrubMarks = document.querySelector<HTMLElement>("#scrub-marks")!;
+const currentTimeText = document.querySelector<HTMLElement>("#current-time")!;
+const totalTimeText = document.querySelector<HTMLElement>("#total-time")!;
+const speedButton = document.querySelector<HTMLButtonElement>("#speed")!;
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
 const lectureList = document.querySelector<HTMLUListElement>("#lecture-list")!;
 const searchResults = document.querySelector<HTMLUListElement>("#search-results")!;
 const sidebarEmpty = document.querySelector<HTMLElement>("#sidebar-empty")!;
+const layout = document.querySelector<HTMLElement>("#layout")!;
+const collapseButton = document.querySelector<HTMLButtonElement>("#collapse")!;
+const expandButton = document.querySelector<HTMLButtonElement>("#expand")!;
+const meter = document.querySelector<HTMLElement>("#meter")!;
 
 let startTime = 0;
 let timerInterval: number | undefined;
@@ -64,9 +76,15 @@ let markCount = 0;
 let audioContext: AudioContext | undefined;
 let segments: Segment[] = [];
 let lineButtons: HTMLButtonElement[] = [];
+let markStarts: number[] = [];
+let scrubbing = false;
+let speedIndex = 0;
+const playbackSpeeds = [1, 1.25, 1.5, 1.75, 2, 0.75];
 let currentLine = -1;
 let currentPath = "";
 let searchTimeout: number | undefined;
+let meterInterval: number | undefined;
+const meterBars: HTMLSpanElement[] = [];
 
 // turns milliseconds into 03:25 (or 1:03:25 once it passes an hour)
 function formatTime(milliseconds: number) {
@@ -95,10 +113,67 @@ function recordedAtFromPath(path: string) {
 }
 
 function setRecording(isRecording: boolean) {
+  document.body.classList.toggle("recording-active", isRecording);
   recordButton.classList.toggle("recording", isRecording);
   recordButton.setAttribute("aria-pressed", String(isRecording));
   buttonLabel.textContent = isRecording ? "Stop" : "Record";
   markButton.hidden = !isRecording;
+
+  if (isRecording) {
+    meterInterval = setInterval(updateMeter, 70);
+  } else {
+    clearInterval(meterInterval);
+    for (const bar of meterBars) bar.style.transform = "";
+  }
+}
+
+// --- level meter ---
+// bars scroll left, newest level on the right
+
+for (let i = 0; i < 40; i++) {
+  const bar = document.createElement("span");
+  meter.append(bar);
+  meterBars.push(bar);
+}
+
+async function updateMeter() {
+  const level = await invoke<number>("mic_level");
+  // square root so quiet speech still moves the bars
+  const height = Math.max(0.08, Math.min(1, Math.sqrt(level) * 1.3));
+
+  for (let i = 0; i < meterBars.length - 1; i++) {
+    meterBars[i].style.transform = meterBars[i + 1].style.transform;
+  }
+  meterBars[meterBars.length - 1].style.transform = `scaleY(${height})`;
+}
+
+// --- hiding the sidebar ---
+
+function setSidebarHidden(hidden: boolean) {
+  layout.classList.toggle("collapsed", hidden);
+  expandButton.hidden = !hidden;
+  try {
+    localStorage.setItem("sidebarHidden", String(hidden));
+  } catch {
+    // not being able to remember this isn't a problem
+  }
+}
+
+collapseButton.addEventListener("click", () => setSidebarHidden(true));
+expandButton.addEventListener("click", () => setSidebarHidden(false));
+
+// ⌘\ toggles it, same as a lot of Mac apps
+document.addEventListener("keydown", (event) => {
+  if (event.metaKey && event.key === "\\") {
+    event.preventDefault();
+    setSidebarHidden(!layout.classList.contains("collapsed"));
+  }
+});
+
+try {
+  if (localStorage.getItem("sidebarHidden") === "true") setSidebarHidden(true);
+} catch {
+  // start with it showing
 }
 
 // a quiet tick so you know the mark worked without looking at the screen
@@ -157,7 +232,10 @@ function showTranscript(audioPath: string, transcript: Transcript) {
   });
 
   // rust works out which lines each mark covers (see marks.rs)
+  markStarts = [];
   for (const range of transcript.marks) {
+    const firstLine = segments[range.first_line];
+    if (firstLine) markStarts.push(firstLine.start_ms);
     for (let index = range.first_line; index <= range.last_line; index++) {
       lineButtons[index]?.classList.add("in-mark");
     }
@@ -167,6 +245,8 @@ function showTranscript(audioPath: string, transcript: Transcript) {
 
   lectureTitle.textContent = formatDate(recordedAtFromPath(audioPath));
   player.src = convertFileSrc(audioPath);
+  scrubber.value = "0";
+  updateScrubFill();
   playback.hidden = segments.length === 0;
   highlightOpenLecture();
 }
@@ -190,6 +270,103 @@ player.addEventListener("timeupdate", () => {
     line.classList.add("current");
     line.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
+});
+
+// --- the play bar ---
+
+function togglePlaying() {
+  if (player.paused) {
+    player.play();
+  } else {
+    player.pause();
+  }
+}
+
+function updatePlayButton() {
+  playButton.classList.toggle("playing", !player.paused);
+  playButton.setAttribute("aria-label", player.paused ? "Play" : "Pause");
+}
+
+function skipBy(seconds: number) {
+  const end = player.duration || 0;
+  player.currentTime = Math.min(end, Math.max(0, player.currentTime + seconds));
+}
+
+// the ember part of the track is drawn from --progress
+function updateScrubFill() {
+  const end = Number(scrubber.max);
+  const percent = end > 0 ? (Number(scrubber.value) / end) * 100 : 0;
+  scrubber.style.setProperty("--progress", `${percent}%`);
+}
+
+// little ember ticks on the track where each mark starts, click one to jump there
+function drawScrubMarks() {
+  scrubMarks.replaceChildren();
+  const durationMs = player.duration * 1000;
+  if (!durationMs) return;
+
+  for (const startMs of markStarts) {
+    const tick = document.createElement("button");
+    tick.type = "button";
+    tick.className = "scrub-mark";
+    tick.style.left = `${(startMs / durationMs) * 100}%`;
+    tick.setAttribute("aria-label", `Play your mark at ${formatTime(startMs)}`);
+    tick.title = `Your mark, ${formatTime(startMs)}`;
+    tick.addEventListener("click", () => {
+      player.currentTime = startMs / 1000;
+      player.play();
+    });
+    scrubMarks.append(tick);
+  }
+}
+
+playButton.addEventListener("click", togglePlaying);
+backButton.addEventListener("click", () => skipBy(-15));
+forwardButton.addEventListener("click", () => skipBy(15));
+player.addEventListener("play", updatePlayButton);
+player.addEventListener("pause", updatePlayButton);
+player.addEventListener("ended", updatePlayButton);
+
+player.addEventListener("loadedmetadata", () => {
+  scrubber.max = String(player.duration);
+  totalTimeText.textContent = formatTime(player.duration * 1000);
+  updateScrubFill();
+  drawScrubMarks();
+});
+
+player.addEventListener("timeupdate", () => {
+  if (scrubbing) return;
+  scrubber.value = String(player.currentTime);
+  currentTimeText.textContent = formatTime(player.currentTime * 1000);
+  updateScrubFill();
+});
+
+// while dragging just show the time, then jump when they let go
+scrubber.addEventListener("input", () => {
+  scrubbing = true;
+  currentTimeText.textContent = formatTime(Number(scrubber.value) * 1000);
+  updateScrubFill();
+});
+
+scrubber.addEventListener("change", () => {
+  player.currentTime = Number(scrubber.value);
+  scrubbing = false;
+});
+
+speedButton.addEventListener("click", () => {
+  speedIndex = (speedIndex + 1) % playbackSpeeds.length;
+  const speed = playbackSpeeds[speedIndex];
+  player.playbackRate = speed;
+  speedButton.textContent = `${speed}×`;
+});
+
+// space plays and pauses, unless you're typing or on a button
+document.addEventListener("keydown", (event) => {
+  if (event.code !== "Space" || playback.hidden) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("input, textarea, button")) return;
+  event.preventDefault();
+  togglePlaying();
 });
 
 async function openLecture(path: string, jumpToLine?: number) {
