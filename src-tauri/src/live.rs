@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::cooling::{current_heat, hurry_up, rest, run_in_background, Heat};
 use crate::transcriber::{ends_sentence, Segment, Transcriber, WHISPER_SAMPLE_RATE};
 
 // transcribe about a minute at a time, so a 75 minute class is
@@ -12,6 +13,10 @@ const CHUNK_SECONDS: usize = 60;
 // look for a quiet spot in the last few seconds of a chunk to cut at,
 // so a word doesn't get split in half between two chunks
 const CUT_SEARCH_SECONDS: usize = 5;
+// when the mac is warm, wait this long between chunks
+const WARM_REST: Duration = Duration::from_secs(20);
+// when it's hot, check again this often until it cools down
+const HOT_REST: Duration = Duration::from_secs(10);
 
 // audio the recorder has captured that hasn't been transcribed yet (16k mono)
 pub type PendingAudio = Arc<Mutex<Vec<f32>>>;
@@ -22,15 +27,18 @@ pub struct LiveTranscriber {
 }
 
 impl LiveTranscriber {
-    // on_progress gets called with how far into the recording is transcribed, in ms
+    // on_progress gets called with how far into the recording is transcribed, in ms.
+    // on_resting gets called with true when it takes a break to let the mac cool down,
+    // and false when it starts again
     pub fn start(
         model_path: PathBuf,
         pending: PendingAudio,
         on_progress: impl Fn(i64) + Send + 'static,
+        on_resting: impl Fn(bool) + Send + 'static,
     ) -> Self {
         let finished = Arc::new(AtomicBool::new(false));
         let worker_finished = finished.clone();
-        let worker = thread::spawn(move || run(&model_path, &pending, &worker_finished, on_progress));
+        let worker = thread::spawn(move || run(&model_path, &pending, &worker_finished, on_progress, on_resting));
         Self { finished, worker }
     }
 
@@ -46,17 +54,37 @@ fn run(
     pending: &PendingAudio,
     finished: &AtomicBool,
     on_progress: impl Fn(i64),
+    on_resting: impl Fn(bool),
 ) -> Result<Vec<Segment>, String> {
+    run_in_background();
     let transcriber = Transcriber::load(model_path)?;
     let chunk_length = CHUNK_SECONDS * WHISPER_SAMPLE_RATE as usize;
 
     let mut lines = Vec::new();
     let mut done_samples = 0;
+    let mut resting = false;
+    let mut hurrying = false;
 
     loop {
         // check finished before looking at the audio, so nothing recorded
         // right at the end gets missed
         let recording_stopped = finished.load(Ordering::SeqCst);
+
+        if recording_stopped && !hurrying {
+            hurry_up();
+            hurrying = true;
+        }
+
+        // too hot: don't transcribe anything until it cools down. the recorder keeps
+        // adding to pending the whole time, so nothing is lost, it just catches up later
+        if !recording_stopped && current_heat() == Heat::Hot {
+            if !resting {
+                on_resting(true);
+                resting = true;
+            }
+            rest(HOT_REST, finished);
+            continue;
+        }
 
         let chunk: Vec<f32> = {
             let mut audio = pending.lock().unwrap();
@@ -80,6 +108,11 @@ fn run(
             continue;
         }
 
+        if resting {
+            on_resting(false);
+            resting = false;
+        }
+
         let start_ms = samples_to_ms(done_samples);
         let new_lines = transcriber.transcribe_audio(&chunk, start_ms)?;
         join_pieces(&mut lines, new_lines);
@@ -88,6 +121,13 @@ fn run(
 
         if recording_stopped {
             break;
+        }
+
+        // warm: still keep going, just with a break between chunks
+        if current_heat() == Heat::Warm {
+            on_resting(true);
+            resting = true;
+            rest(WARM_REST, finished);
         }
     }
 

@@ -205,6 +205,12 @@ listen<number>("transcribed-up-to", (event) => {
   progressText.textContent = `Transcribed up to ${formatTime(event.payload)}`;
 });
 
+// the transcriber takes breaks when the mac gets warm. the recording keeps going either way
+listen<boolean>("transcription-resting", (event) => {
+  if (!recordButton.classList.contains("recording") || !event.payload) return;
+  progressText.textContent = "Letting your Mac cool down. Still recording, the transcript will catch up";
+});
+
 // each line is a button, clicking it jumps the audio to when that was said
 function showTranscript(audioPath: string, transcript: Transcript) {
   currentPath = audioPath;

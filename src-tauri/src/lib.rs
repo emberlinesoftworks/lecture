@@ -1,3 +1,4 @@
+pub mod cooling;
 pub mod lectures;
 pub mod live;
 pub mod marks;
@@ -89,9 +90,17 @@ fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<Stri
     let model_path = model_path(&app)?;
     let live = model_path.exists().then(|| {
         let progress_app = app.clone();
-        LiveTranscriber::start(model_path, pending, move |done_ms| {
-            let _ = progress_app.emit("transcribed-up-to", done_ms);
-        })
+        let resting_app = app.clone();
+        LiveTranscriber::start(
+            model_path,
+            pending,
+            move |done_ms| {
+                let _ = progress_app.emit("transcribed-up-to", done_ms);
+            },
+            move |resting| {
+                let _ = resting_app.emit("transcription-resting", resting);
+            },
+        )
     });
 
     *recording = Some(ActiveRecording { recording: new_recording, live });

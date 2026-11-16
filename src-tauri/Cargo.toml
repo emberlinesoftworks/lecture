@@ -27,6 +27,10 @@ hound = "3.5"
 whisper-rs = { version = "0.16", features = ["metal"] }
 tauri-plugin-global-shortcut = "2"
 
+# asking macos how warm it's running, see cooling.rs
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo"] }
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
