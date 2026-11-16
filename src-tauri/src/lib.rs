@@ -2,6 +2,7 @@ pub mod cooling;
 pub mod lectures;
 pub mod live;
 pub mod marks;
+pub mod models;
 mod recorder;
 pub mod silence;
 pub mod transcriber;
@@ -37,14 +38,16 @@ struct StoppedRecording {
     transcript: Option<Transcript>,
 }
 
+fn models_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("models"))
+}
+
+// the speech model in use. if nothing is downloaded yet this path won't exist,
+// and the window shows the first launch screen
 fn model_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    // TODO: download the model on first launch instead of copying it by hand
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("models")
-        .join("ggml-large-v3-turbo.bin"))
+    let folder = models_folder(app)?;
+    let choice = models::current_choice(&folder).unwrap_or(models::Choice::Accurate);
+    Ok(folder.join(models::model_file(choice).file_name))
 }
 
 // saves the transcript next to the recording
@@ -217,6 +220,31 @@ fn export_lecture(app: tauri::AppHandle, path: String, title: String) -> Result<
     Ok(markdown_path.display().to_string())
 }
 
+#[tauri::command]
+fn model_status(app: tauri::AppHandle) -> Result<models::ModelStatus, String> {
+    Ok(models::status(&models_folder(&app)?))
+}
+
+// downloads the model you picked (and the voice detector), then switches to it
+#[tauri::command]
+async fn download_model(app: tauri::AppHandle, choice: models::Choice) -> Result<(), String> {
+    let folder = models_folder(&app)?;
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        models::download(&folder, choice, |done, total| {
+            let _ = progress_app.emit("download-progress", (done, total));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// switches between models that are already downloaded
+#[tauri::command]
+fn use_model(app: tauri::AppHandle, choice: models::Choice) -> Result<(), String> {
+    models::save_choice(&models_folder(&app)?, choice)
+}
+
 // ⌥⌘M
 fn mark_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::ALT | Modifiers::SUPER), Code::KeyM)
@@ -253,7 +281,10 @@ pub fn run() {
             list_lectures,
             open_lecture,
             search_lectures,
-            export_lecture
+            export_lecture,
+            model_status,
+            download_model,
+            use_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -69,6 +69,18 @@ const layout = document.querySelector<HTMLElement>("#layout")!;
 const collapseButton = document.querySelector<HTMLButtonElement>("#collapse")!;
 const expandButton = document.querySelector<HTMLButtonElement>("#expand")!;
 const meter = document.querySelector<HTMLElement>("#meter")!;
+const recorder = document.querySelector<HTMLElement>("#recorder")!;
+const setup = document.querySelector<HTMLElement>("#setup")!;
+const setupTitle = document.querySelector<HTMLElement>("#setup-title")!;
+const modelChoices = document.querySelectorAll<HTMLButtonElement>(".model-choice");
+const downloadButton = document.querySelector<HTMLButtonElement>("#download")!;
+const setupBackButton = document.querySelector<HTMLButtonElement>("#setup-back")!;
+const downloadProgress = document.querySelector<HTMLElement>("#download-progress")!;
+const downloadAmount = document.querySelector<HTMLElement>("#download-amount")!;
+const downloadFill = document.querySelector<HTMLElement>("#download-fill")!;
+const setupError = document.querySelector<HTMLElement>("#setup-error")!;
+const modelButton = document.querySelector<HTMLButtonElement>("#model-button")!;
+const modelName = document.querySelector<HTMLElement>("#model-name")!;
 
 let startTime = 0;
 let timerInterval: number | undefined;
@@ -378,6 +390,8 @@ document.addEventListener("keydown", (event) => {
 async function openLecture(path: string, jumpToLine?: number) {
   try {
     const transcript = await invoke<Transcript>("open_lecture", { path });
+    // opening a lecture from the sidebar closes the model screen (unless there's no model yet)
+    if (!setup.hidden && modelStatus?.current) hideSetup();
     showTranscript(path, transcript);
     statusText.textContent = "";
 
@@ -579,5 +593,132 @@ recordButton.addEventListener("click", async () => {
     recordButton.disabled = false;
   }
 });
+
+// --- speech model: first launch and switching ---
+
+type ModelChoice = "fast" | "accurate";
+
+type ModelStatus = {
+  current: ModelChoice | null;
+  fast_downloaded: boolean;
+  accurate_downloaded: boolean;
+};
+
+const modelLabels: Record<ModelChoice, string> = { fast: "Fast", accurate: "Most accurate" };
+let modelStatus: ModelStatus | undefined;
+let pickedModel: ModelChoice = "accurate";
+let downloading = false;
+
+function formatSize(bytes: number) {
+  const megabytes = bytes / (1024 * 1024);
+  return megabytes >= 1000 ? `${(megabytes / 1024).toFixed(1)} GB` : `${Math.round(megabytes)} MB`;
+}
+
+function isDownloaded(choice: ModelChoice) {
+  return choice === "fast" ? modelStatus?.fast_downloaded : modelStatus?.accurate_downloaded;
+}
+
+function pickModel(choice: ModelChoice) {
+  pickedModel = choice;
+  modelChoices.forEach((button) => {
+    button.setAttribute("aria-checked", String(button.dataset.choice === choice));
+  });
+
+  if (choice === modelStatus?.current) {
+    downloadButton.textContent = "In use";
+    downloadButton.disabled = true;
+  } else {
+    downloadButton.textContent = isDownloaded(choice) ? "Use this model" : "Download";
+    downloadButton.disabled = false;
+  }
+}
+
+function showSetup(firstLaunch: boolean) {
+  setup.hidden = false;
+  recorder.hidden = true;
+  playback.hidden = true;
+  setupTitle.textContent = firstLaunch ? "Welcome to Lecture" : "Speech model";
+  setupBackButton.hidden = firstLaunch;
+  setupError.textContent = "";
+  pickModel(modelStatus?.current ?? "accurate");
+}
+
+function hideSetup() {
+  setup.hidden = true;
+  recorder.hidden = false;
+  playback.hidden = segments.length === 0;
+}
+
+async function refreshModelStatus() {
+  modelStatus = await invoke<ModelStatus>("model_status");
+  const current = modelStatus.current;
+  modelButton.hidden = current === null;
+  if (current) modelName.textContent = modelLabels[current];
+  return modelStatus;
+}
+
+modelChoices.forEach((button) => {
+  button.addEventListener("click", () => {
+    if (!downloading) pickModel(button.dataset.choice as ModelChoice);
+  });
+});
+
+listen<[number, number]>("download-progress", (event) => {
+  const [done, total] = event.payload;
+  if (total > 0) {
+    downloadAmount.textContent = `${formatSize(done)} of ${formatSize(total)}`;
+    downloadFill.style.width = `${Math.min(100, (done / total) * 100)}%`;
+  } else {
+    downloadAmount.textContent = formatSize(done);
+  }
+});
+
+downloadButton.addEventListener("click", async () => {
+  setupError.textContent = "";
+
+  // already downloaded, just switch to it
+  if (isDownloaded(pickedModel)) {
+    await invoke("use_model", { choice: pickedModel });
+    await refreshModelStatus();
+    hideSetup();
+    return;
+  }
+
+  downloading = true;
+  downloadButton.disabled = true;
+  setupBackButton.disabled = true;
+  downloadButton.textContent = "Downloading...";
+  downloadProgress.hidden = false;
+  downloadAmount.textContent = "";
+  downloadFill.style.width = "0%";
+
+  try {
+    await invoke("download_model", { choice: pickedModel });
+    await refreshModelStatus();
+    hideSetup();
+    statusText.textContent = "All set. Press Record when class starts.";
+  } catch (error) {
+    setupError.textContent = String(error);
+    downloadButton.disabled = false;
+    downloadButton.textContent = "Try again";
+  } finally {
+    downloading = false;
+    setupBackButton.disabled = false;
+    downloadProgress.hidden = true;
+  }
+});
+
+setupBackButton.addEventListener("click", hideSetup);
+
+modelButton.addEventListener("click", () => {
+  if (recordButton.classList.contains("recording")) return;
+  showSetup(false);
+});
+
+refreshModelStatus()
+  .then((status) => {
+    if (status.current === null) showSetup(true);
+  })
+  .catch((error) => (statusText.textContent = String(error)));
 
 refreshLectureList().catch((error) => (statusText.textContent = String(error)));

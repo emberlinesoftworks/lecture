@@ -48,10 +48,64 @@
         <ul id="lecture-list" class="lecture-list"></ul>
         <ul id="search-results" class="search-results" hidden></ul>
         <p id="sidebar-empty" class="sidebar-empty" hidden></p>
+
+        <button id="model-button" class="model-button" type="button" hidden>
+          Speech model: <span id="model-name"></span>
+        </button>
       </aside>
 
       <main class="app">
-        <section class="recorder">
+        <!-- first launch: pick and download a speech model -->
+        <section id="setup" class="setup" hidden>
+          <svg class="setup-mark brand-mark" viewBox="16 16 66 68" aria-hidden="true">
+            <rect x="16" y="16" width="14" height="68" />
+            <rect x="16" y="16" width="66" height="14" />
+            <rect x="16" y="70" width="66" height="14" />
+            <rect class="brand-spark-bar" x="37" y="43" width="29" height="14" />
+            <rect class="brand-spark" x="72" y="35" width="10" height="10" />
+          </svg>
+          <h1 id="setup-title" class="setup-title">Welcome to Lecture</h1>
+          <p class="setup-text">
+            Lecture turns speech into text right on your Mac, so it needs a speech model first. It's a one-time
+            download, and after that nothing you record ever leaves your computer.
+          </p>
+
+          <div class="model-choices" role="radiogroup" aria-label="Speech model">
+            <button class="model-choice" type="button" role="radio" aria-checked="false" data-choice="fast">
+              <span class="model-choice-top">
+                <span class="model-choice-name">Fast</span>
+                <span class="plan-badge">Free</span>
+              </span>
+              <span class="model-choice-about">Good transcripts, easy on battery and heat.</span>
+              <span class="model-choice-size">466 MB</span>
+            </button>
+            <button class="model-choice" type="button" role="radio" aria-checked="true" data-choice="accurate">
+              <span class="model-choice-top">
+                <span class="model-choice-name">Most accurate</span>
+                <span class="plan-badge plan-badge-pro">Pro</span>
+              </span>
+              <span class="model-choice-about">Barely slower, far fewer mistakes on names and terms.</span>
+              <span class="model-choice-size">1.6 GB, free during the beta</span>
+            </button>
+          </div>
+
+          <div id="download-progress" class="download-progress" hidden>
+            <div class="download-label">
+              <span>Downloading</span>
+              <span id="download-amount" class="download-amount"></span>
+            </div>
+            <div class="download-track"><div id="download-fill" class="download-fill"></div></div>
+          </div>
+
+          <p id="setup-error" class="setup-error" role="alert"></p>
+
+          <div class="setup-actions">
+            <button id="setup-back" class="setup-back" type="button" hidden>Back</button>
+            <button id="download" class="download-button" type="button">Download</button>
+          </div>
+        </section>
+
+        <section id="recorder" class="recorder">
           <p id="timer" class="timer">00:00</p>
           <div id="meter" class="meter" aria-hidden="true"></div>
           <button id="record" class="record" type="button" aria-pressed="false">

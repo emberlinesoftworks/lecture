@@ -26,6 +26,9 @@ cpal = "0.15"
 hound = "3.5"
 whisper-rs = { version = "0.16", features = ["metal"] }
 tauri-plugin-global-shortcut = "2"
+# downloading the speech models on first launch, see models.rs
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha1 = "0.10"
 
 # asking macos how warm it's running, see cooling.rs
 [target.'cfg(target_os = "macos")'.dependencies]
