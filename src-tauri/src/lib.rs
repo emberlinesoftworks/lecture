@@ -62,13 +62,26 @@ fn lecture_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 // only touch files in the Lecture folder, whatever path the window sends
+// (lectures can also be one folder down, like Lecture/Math 172/lecture-123.wav)
 fn lecture_file(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
     let folder = lecture_folder(app)?;
     let path = PathBuf::from(path);
-    if path.parent() != Some(folder.as_path()) {
+    let sneaky = path.components().any(|part| matches!(part, std::path::Component::ParentDir));
+    let parent = path.parent();
+    let in_lecture_folder = parent == Some(folder.as_path()) || parent.and_then(|p| p.parent()) == Some(folder.as_path());
+    if sneaky || !in_lecture_folder {
         return Err("That file isn't in the Lecture folder".into());
     }
     Ok(path)
+}
+
+// a folder inside the Lecture folder, by name. none means the Lecture folder itself
+fn lecture_subfolder(app: &tauri::AppHandle, name: Option<&str>) -> Result<PathBuf, String> {
+    let root = lecture_folder(app)?;
+    match name {
+        Some(name) => Ok(root.join(lectures::check_folder_name(name)?)),
+        None => Ok(root),
+    }
 }
 
 #[tauri::command]
@@ -130,6 +143,7 @@ async fn stop_recording(state: State<'_, AppState>) -> Result<StoppedRecording, 
     let transcript = match lines {
         Some(lines) => {
             let transcript = Transcript {
+                title: None,
                 marks: marks::marked_ranges(&lines, &marks),
                 lines,
             };
@@ -198,6 +212,7 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
     .map_err(|e| e.to_string())??;
 
     let transcript = Transcript {
+        title: None,
         marks: marks::marked_ranges(&lines, &marks),
         lines,
     };
@@ -222,6 +237,9 @@ async fn retranscribe(app: tauri::AppHandle, path: String) -> Result<Transcript,
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
 
+    // keep the name you gave it
+    let title = lectures::load_transcript(&wav_path).ok().and_then(|old| old.title);
+
     let transcript_path = wav_path.with_extension("json");
     if transcript_path.exists() {
         std::fs::copy(&transcript_path, wav_path.with_extension("before.json")).map_err(|e| e.to_string())?;
@@ -236,11 +254,61 @@ async fn retranscribe(app: tauri::AppHandle, path: String) -> Result<Transcript,
         .map_err(|e| e.to_string())??;
 
     let transcript = Transcript {
+        title,
         marks: marks::marked_ranges(&lines, &marks),
         lines,
     };
     save_transcript(&wav_path, &transcript)?;
     Ok(transcript)
+}
+
+#[tauri::command]
+fn delete_lecture(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    lectures::delete_lecture(&lecture_file(&app, &path)?)
+}
+
+#[tauri::command]
+fn rename_lecture(app: tauri::AppHandle, path: String, title: String) -> Result<(), String> {
+    lectures::rename_lecture(&lecture_file(&app, &path)?, &title)
+}
+
+// folder: none moves it back out to the main list. returns where it ended up
+#[tauri::command]
+fn move_lecture(app: tauri::AppHandle, path: String, folder: Option<String>) -> Result<String, String> {
+    let to_folder = lecture_subfolder(&app, folder.as_deref())?;
+    let new_path = lectures::move_lecture(&lecture_file(&app, &path)?, &to_folder)?;
+    Ok(new_path.display().to_string())
+}
+
+// folder: none is the main list. files: the recordings' file names, top to bottom
+#[tauri::command]
+fn save_order(app: tauri::AppHandle, folder: Option<String>, files: Vec<String>) -> Result<(), String> {
+    if let Some(name) = &folder {
+        lectures::check_folder_name(name)?;
+    }
+    lectures::save_order(&lecture_folder(&app)?, folder.as_deref(), files)
+}
+
+#[tauri::command]
+fn list_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    Ok(lectures::list_folders(&lecture_folder(&app)?))
+}
+
+#[tauri::command]
+fn create_folder(app: tauri::AppHandle, name: String) -> Result<String, String> {
+    let root = lecture_folder(&app)?;
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    lectures::create_folder(&root, &name)
+}
+
+#[tauri::command]
+fn rename_folder(app: tauri::AppHandle, name: String, new_name: String) -> Result<String, String> {
+    lectures::rename_folder(&lecture_folder(&app)?, &name, &new_name)
+}
+
+#[tauri::command]
+fn delete_folder(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    lectures::delete_folder(&lecture_folder(&app)?, &name)
 }
 
 #[tauri::command]
@@ -325,6 +393,14 @@ pub fn run() {
             mic_level,
             transcribe,
             retranscribe,
+            delete_lecture,
+            rename_lecture,
+            move_lecture,
+            save_order,
+            list_folders,
+            create_folder,
+            rename_folder,
+            delete_folder,
             list_lectures,
             open_lecture,
             search_lectures,

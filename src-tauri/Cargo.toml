@@ -30,9 +30,9 @@ tauri-plugin-global-shortcut = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha1 = "0.10"
 
-# asking macos how warm it's running, see cooling.rs
+# asking macos how warm it's running (cooling.rs) and moving deleted lectures to the Trash (lectures.rs)
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSFileManager", "NSURL", "NSError", "NSString"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

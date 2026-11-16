@@ -15,6 +15,7 @@ type MarkedRange = {
 };
 
 type Transcript = {
+  title?: string | null;
   lines: Segment[];
   marks: MarkedRange[];
 };
@@ -28,6 +29,8 @@ type StoppedRecording = {
 
 type LectureSummary = {
   path: string;
+  title: string | null;
+  folder: string | null;
   recorded_at: number;
   duration_ms: number;
   preview: string;
@@ -50,8 +53,12 @@ const statusText = document.querySelector<HTMLElement>("#status")!;
 const progressText = document.querySelector<HTMLElement>("#progress")!;
 const playback = document.querySelector<HTMLElement>("#playback")!;
 const lectureTitle = document.querySelector<HTMLElement>("#lecture-title")!;
+const lectureWhen = document.querySelector<HTMLElement>("#lecture-when")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#export")!;
 const retranscribeButton = document.querySelector<HTMLButtonElement>("#retranscribe")!;
+const editListButton = document.querySelector<HTMLButtonElement>("#edit-list")!;
+const editBar = document.querySelector<HTMLElement>("#edit-bar")!;
+const newFolderButton = document.querySelector<HTMLButtonElement>("#new-folder")!;
 const player = document.querySelector<HTMLAudioElement>("#player")!;
 const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
 const playButton = document.querySelector<HTMLButtonElement>("#play")!;
@@ -299,7 +306,8 @@ function showTranscript(audioPath: string, transcript: Transcript) {
       "Nothing was heard in this recording, so there's no transcript. If someone was talking, check your microphone in System Settings → Sound";
   }
 
-  lectureTitle.textContent = formatDate(recordedAtFromPath(audioPath));
+  showLectureName(transcript.title);
+  lectureWhen.textContent = formatDate(recordedAtFromPath(audioPath));
   player.src = convertFileSrc(audioPath);
   scrubber.value = "0";
   updateScrubFill();
@@ -445,46 +453,590 @@ async function openLecture(path: string, jumpToLine?: number) {
 // --- sidebar: saved lectures and search ---
 
 function highlightOpenLecture() {
-  for (const button of lectureList.querySelectorAll<HTMLButtonElement>("button")) {
+  for (const button of lectureList.querySelectorAll<HTMLButtonElement>(".lecture-item")) {
     button.classList.toggle("open", button.dataset.path === currentPath);
   }
 }
 
 async function refreshLectureList() {
-  const lectures = await invoke<LectureSummary[]>("list_lectures");
+  const [lectures, folders] = await Promise.all([
+    invoke<LectureSummary[]>("list_lectures"),
+    invoke<string[]>("list_folders"),
+  ]);
+  folderNames = folders;
   lectureList.replaceChildren();
 
-  for (const lecture of lectures) {
-    const item = document.createElement("li");
-    const button = document.createElement("button");
-    const date = document.createElement("span");
-    const preview = document.createElement("span");
-    const details = document.createElement("span");
-
-    button.type = "button";
-    button.className = "lecture-item";
-    button.dataset.path = lecture.path;
-    date.className = "lecture-date";
-    preview.className = "lecture-preview";
-    details.className = "lecture-details";
-
-    date.textContent = formatDate(lecture.recorded_at);
-    preview.textContent = lecture.preview;
-    details.textContent = formatTime(lecture.duration_ms);
-    if (lecture.mark_count > 0) {
-      details.textContent += ` · ${lecture.mark_count} ${lecture.mark_count === 1 ? "mark" : "marks"}`;
-    }
-
-    button.append(date, preview, details);
-    button.addEventListener("click", () => openLecture(lecture.path));
-    item.append(button);
-    lectureList.append(item);
+  // folders first, then whatever isn't in one (new recordings land there)
+  for (const folder of folders) {
+    lectureList.append(buildFolder(folder, lectures.filter((lecture) => lecture.folder === folder)));
+  }
+  for (const lecture of lectures.filter((lecture) => !lecture.folder)) {
+    lectureList.append(editing ? buildEditableLecture(lecture) : buildLecture(lecture));
   }
 
   sidebarEmpty.textContent = "Your lectures will show up here after you record one.";
-  sidebarEmpty.hidden = lectures.length > 0 || !searchResults.hidden;
+  sidebarEmpty.hidden = lectures.length > 0 || folders.length > 0 || !searchResults.hidden;
   highlightOpenLecture();
 }
+
+// --- organizing the list: folders, names, moving and deleting ---
+// folders are real folders in Documents/Lecture, so Finder shows the same thing
+
+let editing = false;
+let folderNames: string[] = [];
+const closedFolders = new Set<string>(loadClosedFolders());
+
+function loadClosedFolders(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem("closedFolders") ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveClosedFolders() {
+  try {
+    localStorage.setItem("closedFolders", JSON.stringify([...closedFolders]));
+  } catch {
+    // forgetting which folders were closed isn't a problem
+  }
+}
+
+// what a lecture is called until you name it.
+// TODO: have the on-device language model name it from the transcript once that's in (v0.5)
+const UNTITLED = "Untitled lecture";
+
+function lectureName(lecture: LectureSummary) {
+  return lecture.title || UNTITLED;
+}
+
+function showLectureName(title: string | null | undefined) {
+  lectureTitle.textContent = title || UNTITLED;
+}
+
+// "Mon, Nov 16, 11:06 AM · 47:38 · 3 marks"
+function lectureDetails(lecture: LectureSummary) {
+  let details = `${formatDate(lecture.recorded_at)} · ${formatTime(lecture.duration_ms)}`;
+  if (lecture.mark_count > 0) {
+    details += ` · ${lecture.mark_count} ${lecture.mark_count === 1 ? "mark" : "marks"}`;
+  }
+  return details;
+}
+
+function svgIcon(path: string) {
+  return `<svg viewBox="0 0 20 20" aria-hidden="true">${path}</svg>`;
+}
+
+const icons = {
+  chevron: svgIcon('<path d="M7.5 5 12.5 10l-5 5" />'),
+  grip: svgIcon('<circle cx="7.5" cy="5" r="1" /><circle cx="12.5" cy="5" r="1" /><circle cx="7.5" cy="10" r="1" /><circle cx="12.5" cy="10" r="1" /><circle cx="7.5" cy="15" r="1" /><circle cx="12.5" cy="15" r="1" />'),
+  pencil: svgIcon('<path d="M12.5 4.5l3 3L8 15H5v-3z" />'),
+  folder: svgIcon('<path d="M3 6.5V15h14V7.5H9.5L8 5.5H3z" />'),
+  trash: svgIcon('<path d="M4.5 6h11M8 6V4.5h4V6M6 6l.7 9.5h6.6L14 6" />'),
+};
+
+function buildLecture(lecture: LectureSummary) {
+  const item = document.createElement("li");
+  const button = document.createElement("button");
+  const name = document.createElement("span");
+  const preview = document.createElement("span");
+  const details = document.createElement("span");
+
+  button.type = "button";
+  button.className = "lecture-item";
+  button.dataset.path = lecture.path;
+  name.className = "lecture-date";
+  preview.className = "lecture-preview";
+  details.className = "lecture-details";
+
+  name.textContent = lectureName(lecture);
+  preview.textContent = lecture.preview;
+  details.textContent = lectureDetails(lecture);
+
+  button.append(name);
+  if (lecture.preview) button.append(preview);
+  button.append(details);
+  button.addEventListener("click", () => openLecture(lecture.path));
+  item.append(button);
+  return item;
+}
+
+// in edit mode a lecture can be renamed, moved (dragged or picked from the menu) and deleted
+function buildEditableLecture(lecture: LectureSummary) {
+  const name = lectureName(lecture);
+  const item = document.createElement("li");
+  item.className = "lecture-row";
+  item.dataset.path = lecture.path;
+  if (lecture.folder) item.dataset.folder = lecture.folder;
+
+  const grip = document.createElement("span");
+  grip.className = "drag-handle";
+  grip.innerHTML = icons.grip;
+
+  const text = document.createElement("div");
+  text.className = "edit-text";
+  const renameButton = document.createElement("button");
+  renameButton.type = "button";
+  renameButton.className = "rename-button";
+  renameButton.textContent = name;
+  renameButton.title = "Rename";
+  const details = document.createElement("span");
+  details.className = "lecture-details";
+  details.textContent = lectureDetails(lecture);
+  text.append(renameButton, details);
+
+  renameButton.addEventListener("click", () => {
+    editInPlace(renameButton, lecture.title ?? "", "Name this lecture", async (title) => {
+      await invoke("rename_lecture", { path: lecture.path, title });
+      if (currentPath === lecture.path) showLectureName(title);
+    });
+  });
+
+  const move = document.createElement("select");
+  move.className = "move-select";
+  move.setAttribute("aria-label", `Move ${name} to a folder`);
+  move.add(new Option("Move", "", true, true));
+  move.options[0].disabled = true;
+  if (lecture.folder) move.add(new Option("Out of the folder", ""));
+  for (const folder of folderNames) {
+    if (folder !== lecture.folder) move.add(new Option(folder, folder));
+  }
+  move.addEventListener("change", () => moveLecture(lecture.path, move.value || null));
+
+  // a folder icon with the real menu laid invisibly over it, so it opens the normal Mac menu
+  const moveButton = document.createElement("span");
+  moveButton.className = "icon-button move-button";
+  moveButton.title = "Move to a folder";
+  moveButton.innerHTML = icons.folder;
+  moveButton.append(move);
+  moveButton.hidden = move.options.length === 1;
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-button";
+  remove.innerHTML = icons.trash;
+  remove.setAttribute("aria-label", `Delete ${name}`);
+  askFirst(remove, "Delete?", async () => {
+    await invoke("delete_lecture", { path: lecture.path });
+    if (currentPath === lecture.path) forgetOpenLecture();
+    statusText.textContent = "Moved to the Trash. You can put it back from the Trash in Finder";
+    await refreshLectureList();
+  });
+
+  item.addEventListener("pointerdown", (event) => startPress(event, item));
+
+  item.append(grip, text, moveButton, remove);
+  return item;
+}
+
+function buildFolder(folder: string, lectures: LectureSummary[]) {
+  const item = document.createElement("li");
+  item.className = "folder";
+  item.dataset.folder = folder;
+  const open = !closedFolders.has(folder);
+
+  const header = document.createElement("div");
+  header.className = "folder-header";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "folder-toggle";
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.innerHTML = icons.chevron;
+  const name = document.createElement("span");
+  name.className = "folder-name";
+  name.textContent = folder;
+  const count = document.createElement("span");
+  count.className = "folder-count";
+  count.textContent = String(lectures.length);
+  toggle.append(name, count);
+  toggle.addEventListener("click", () => {
+    if (closedFolders.has(folder)) closedFolders.delete(folder);
+    else closedFolders.add(folder);
+    saveClosedFolders();
+    refreshLectureList();
+  });
+  header.append(toggle);
+
+  if (editing) {
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "icon-button";
+    rename.innerHTML = icons.pencil;
+    rename.setAttribute("aria-label", `Rename ${folder}`);
+    rename.addEventListener("click", () => {
+      editInPlace(name, folder, "Folder name", async (newName) => {
+        const renamed = await invoke<string>("rename_folder", { name: folder, newName });
+        if (closedFolders.delete(folder)) closedFolders.add(renamed);
+        saveClosedFolders();
+        // the open lecture's path has the folder name in it
+        if (currentPath.includes(`/${folder}/`)) await openLecture(currentPath.replace(`/${folder}/`, `/${renamed}/`));
+      });
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "icon-button";
+    remove.innerHTML = icons.trash;
+    remove.setAttribute("aria-label", `Delete the ${folder} folder`);
+    askFirst(remove, lectures.length > 0 ? "Remove? Lectures stay" : "Remove?", async () => {
+      const openPath = currentPath;
+      await invoke("delete_folder", { name: folder });
+      closedFolders.delete(folder);
+      saveClosedFolders();
+      if (openPath.includes(`/${folder}/`)) await openLecture(openPath.replace(`/${folder}/`, "/"));
+      await refreshLectureList();
+    });
+    header.append(rename, remove);
+  }
+
+  const list = document.createElement("ul");
+  list.className = "folder-lectures";
+  list.hidden = !open || lectures.length === 0;
+  for (const lecture of lectures) list.append(editing ? buildEditableLecture(lecture) : buildLecture(lecture));
+
+  item.append(header, list);
+  return item;
+}
+
+// --- dragging lectures ---
+// each list is basically an array, picking a lecture up leaves a gap that follows the mouse.
+// using plain mouse events since the web view's drag and drop didn't work
+
+const sidebarScroll = document.querySelector<HTMLElement>(".sidebar-scroll")!;
+const DRAG_START_DISTANCE = 5;
+const SCROLL_EDGE = 56;
+const FASTEST_SCROLL = 14; // px per frame, right at the edge
+const SLIDE_MS = 180;
+
+type Drag = {
+  row: HTMLElement;
+  path: string;
+  fromFolder: string | null;
+  startY: number;
+  startX: number;
+  offsetX: number;
+  offsetY: number;
+  pointerId: number;
+  lastX: number;
+  lastY: number;
+  ghost?: HTMLElement;
+  // a closed or empty folder that got opened so it could be dropped into
+  openedList?: HTMLElement;
+};
+
+let drag: Drag | undefined;
+let scrollFrame = 0;
+// a drag ends with a click on whatever was under the mouse, this swallows it
+let swallowNextClick = false;
+
+function startPress(event: PointerEvent, row: HTMLElement) {
+  if (!editing || event.button !== 0 || drag) return;
+  // the move menu, delete and the rename box keep working as normal
+  if ((event.target as HTMLElement).closest("select, input, .icon-button")) return;
+
+  const box = row.getBoundingClientRect();
+  drag = {
+    row,
+    path: row.dataset.path ?? "",
+    fromFolder: row.dataset.folder ?? null,
+    startX: event.clientX,
+    startY: event.clientY,
+    offsetX: event.clientX - box.left,
+    offsetY: event.clientY - box.top,
+    pointerId: event.pointerId,
+    lastX: event.clientX,
+    lastY: event.clientY,
+  };
+}
+
+function beginDragging(current: Drag) {
+  const box = current.row.getBoundingClientRect();
+  const ghost = current.row.cloneNode(true) as HTMLElement;
+  ghost.classList.add("drag-ghost");
+  ghost.style.width = `${box.width}px`;
+  document.body.append(ghost);
+  current.ghost = ghost;
+  // the row itself stays in the list as the empty slot
+  current.row.classList.add("drop-slot");
+  document.body.classList.add("dragging-lecture");
+}
+
+// the copy follows the mouse but never leaves the list area (under New folder, above the bottom)
+function placeGhost(current: Drag) {
+  if (!current.ghost) return;
+  const area = sidebarScroll.getBoundingClientRect();
+  const height = current.ghost.offsetHeight;
+  const x = Math.min(Math.max(current.lastX - current.offsetX, area.left), area.right - current.ghost.offsetWidth);
+  const y = Math.min(Math.max(current.lastY - current.offsetY, area.top), area.bottom - height);
+  current.ghost.style.transform = `translate(${x}px, ${y}px)`;
+}
+
+// every row and folder in the list, for sliding them when the slot moves
+function slidingItems() {
+  return [...lectureList.querySelectorAll<HTMLElement>(".lecture-row, .folder-header")].filter(
+    (item) => !item.classList.contains("drop-slot"),
+  );
+}
+
+// moves the slot and slides the other rows into place
+function moveSlot(current: Drag, list: HTMLElement, before: Element | null) {
+  if (current.row.parentElement === list && current.row.nextElementSibling === before) return;
+
+  const items = slidingItems();
+  const oldTops = new Map(items.map((item) => [item, item.getBoundingClientRect().top]));
+  list.insertBefore(current.row, before);
+
+  for (const item of items) {
+    const shift = (oldTops.get(item) ?? 0) - item.getBoundingClientRect().top;
+    if (Math.abs(shift) < 1) continue;
+    item.animate([{ transform: `translateY(${shift}px)` }, { transform: "translateY(0)" }], {
+      duration: SLIDE_MS,
+      easing: "cubic-bezier(0.23, 1, 0.32, 1)",
+    });
+  }
+}
+
+// the rows in a list the slot can go between (not the slot itself, not folders)
+function rowsIn(list: HTMLElement) {
+  return [...list.children].filter(
+    (child): child is HTMLElement => child.classList.contains("lecture-row") && !child.classList.contains("drop-slot"),
+  );
+}
+
+// the first row whose middle is below the mouse, the slot goes right before it
+function rowAfter(list: HTMLElement, y: number) {
+  return rowsIn(list).find((row) => {
+    const box = row.getBoundingClientRect();
+    return y < box.top + box.height / 2;
+  }) ?? null;
+}
+
+// works out where the lecture would land and moves the slot there
+function updateSlot(current: Drag) {
+  const area = sidebarScroll.getBoundingClientRect();
+  // the copy can't leave the list, so neither can where it lands
+  const x = Math.min(Math.max(current.lastX, area.left + 1), area.right - 1);
+  const y = Math.min(Math.max(current.lastY, area.top + 1), area.bottom - 1);
+
+  // ignore the slot itself when looking at what's under the mouse
+  current.row.style.pointerEvents = "none";
+  const under = document.elementFromPoint(x, y) as HTMLElement | null;
+  current.row.style.pointerEvents = "";
+  if (!under) return;
+
+  const folder = under.closest<HTMLElement>(".folder");
+  if (folder) {
+    const list = folder.querySelector<HTMLElement>(".folder-lectures")!;
+    // over a closed or empty folder's name: open it so there's somewhere to drop
+    if (list.hidden) {
+      if (current.openedList && current.openedList !== list) current.openedList.hidden = true;
+      list.hidden = false;
+      current.openedList = list;
+    }
+    const overHeader = under.closest(".folder-header");
+    moveSlot(current, list, overHeader ? list.firstElementChild : rowAfter(list, y));
+    return;
+  }
+
+  // main list, but skip the little gaps between folders so the slot doesn't jump around
+  const looseRow = under.closest(".lecture-row")?.parentElement === lectureList;
+  const belowList = under === sidebarScroll;
+  if (looseRow || belowList) moveSlot(current, lectureList, rowAfter(lectureList, y));
+}
+
+// scrolls the list when you hold near the top or bottom (only after moving toward that edge)
+function autoScroll() {
+  scrollFrame = 0;
+  if (!drag?.ghost) return;
+
+  const box = sidebarScroll.getBoundingClientRect();
+  const fromTop = drag.lastY - box.top;
+  const fromBottom = box.bottom - drag.lastY;
+  const topZone = Math.min(SCROLL_EDGE, drag.startY - box.top - 4);
+  const bottomZone = Math.min(SCROLL_EDGE, box.bottom - drag.startY - 4);
+  const closeness = (distance: number, zone: number) => Math.min(1, Math.max(0, 1 - distance / zone));
+  let speed = 0;
+  if (fromTop < topZone) speed = -FASTEST_SCROLL * closeness(fromTop, topZone);
+  else if (fromBottom < bottomZone) speed = FASTEST_SCROLL * closeness(fromBottom, bottomZone);
+
+  const bottom = sidebarScroll.scrollHeight - sidebarScroll.clientHeight;
+  const next = Math.min(bottom, Math.max(0, sidebarScroll.scrollTop + speed));
+  if (speed === 0 || Math.abs(next - sidebarScroll.scrollTop) < 0.5) return;
+
+  sidebarScroll.scrollTop = next;
+  // the list moved under the mouse, so where it would land may have changed
+  updateSlot(drag);
+  scrollFrame = requestAnimationFrame(autoScroll);
+}
+
+// the recordings' file names in a list, top to bottom, with the slot where it is
+function filesIn(list: HTMLElement) {
+  return [...list.children]
+    .filter((child): child is HTMLElement => child.classList.contains("lecture-row"))
+    .map((row) => (row.dataset.path ?? "").split("/").pop() ?? "");
+}
+
+async function endDrag(drop: boolean) {
+  const current = drag;
+  drag = undefined;
+  cancelAnimationFrame(scrollFrame);
+  scrollFrame = 0;
+  if (!current?.ghost) return;
+
+  swallowNextClick = true;
+  setTimeout(() => (swallowNextClick = false), 0);
+  current.ghost.remove();
+  document.body.classList.remove("dragging-lecture");
+
+  if (!drop) {
+    await refreshLectureList();
+    return;
+  }
+
+  const list = current.row.parentElement as HTMLElement;
+  const toFolder = list.closest<HTMLElement>(".folder")?.dataset.folder ?? null;
+  const files = filesIn(list);
+  current.row.classList.remove("drop-slot");
+
+  try {
+    if (toFolder !== current.fromFolder) {
+      const newPath = await invoke<string>("move_lecture", { path: current.path, folder: toFolder });
+      if (toFolder) closedFolders.delete(toFolder);
+      saveClosedFolders();
+      if (currentPath === current.path) await openLecture(newPath);
+    }
+    await invoke("save_order", { folder: toFolder, files });
+  } catch (error) {
+    statusText.textContent = String(error);
+  }
+  await refreshLectureList();
+}
+
+document.addEventListener("pointermove", (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  drag.lastX = event.clientX;
+  drag.lastY = event.clientY;
+
+  if (!drag.ghost) {
+    const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (moved < DRAG_START_DISTANCE) return;
+    beginDragging(drag);
+  }
+  event.preventDefault();
+  placeGhost(drag);
+  updateSlot(drag);
+  if (!scrollFrame) scrollFrame = requestAnimationFrame(autoScroll);
+});
+
+document.addEventListener("pointerup", (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  if (drag.ghost) endDrag(true);
+  else drag = undefined;
+});
+document.addEventListener("pointercancel", () => endDrag(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && drag) endDrag(false);
+});
+window.addEventListener("blur", () => {
+  if (drag) endDrag(false);
+});
+document.addEventListener(
+  "click",
+  (event) => {
+    if (!swallowNextClick) return;
+    swallowNextClick = false;
+    event.stopPropagation();
+    event.preventDefault();
+  },
+  true,
+);
+
+async function moveLecture(path: string, folder: string | null) {
+  try {
+    const newPath = await invoke<string>("move_lecture", { path, folder });
+    if (folder) closedFolders.delete(folder);
+    saveClosedFolders();
+    if (currentPath === path) await openLecture(newPath);
+    await refreshLectureList();
+  } catch (error) {
+    statusText.textContent = String(error);
+  }
+}
+
+// swaps some text for a text box. enter or clicking away saves, escape cancels
+function editInPlace(shown: HTMLElement, value: string, placeholder: string, save: (value: string) => Promise<void>) {
+  const input = document.createElement("input");
+  input.className = "inline-input";
+  input.value = value;
+  input.placeholder = placeholder;
+  input.setAttribute("aria-label", placeholder);
+  shown.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  async function finish(keep: boolean) {
+    if (finished) return;
+    finished = true;
+    try {
+      if (keep && input.value.trim() !== value) await save(input.value.trim());
+    } catch (error) {
+      statusText.textContent = String(error);
+    }
+    await refreshLectureList();
+  }
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") finish(true);
+    if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+// asks once before deleting, resets after a few seconds
+function askFirst(button: HTMLButtonElement, question: string, action: () => Promise<void>) {
+  const normal = button.innerHTML;
+  let timeout: number | undefined;
+
+  button.addEventListener("click", async () => {
+    if (!button.classList.contains("confirming")) {
+      button.classList.add("confirming");
+      button.textContent = question;
+      timeout = setTimeout(() => {
+        button.classList.remove("confirming");
+        button.innerHTML = normal;
+      }, 4000);
+      return;
+    }
+    clearTimeout(timeout);
+    try {
+      await action();
+    } catch (error) {
+      statusText.textContent = String(error);
+    }
+  });
+}
+
+function setEditing(on: boolean) {
+  editing = on;
+  editListButton.textContent = on ? "Done" : "Edit";
+  editListButton.setAttribute("aria-pressed", String(on));
+  editBar.hidden = !on;
+  refreshLectureList();
+}
+
+editListButton.addEventListener("click", () => setEditing(!editing));
+
+newFolderButton.addEventListener("click", () => {
+  const item = document.createElement("li");
+  const placeholder = document.createElement("span");
+  item.append(placeholder);
+  lectureList.prepend(item);
+  editInPlace(placeholder, "", "Folder name", async (name) => {
+    if (name) await invoke("create_folder", { name });
+  });
+});
 
 // puts <mark> around every match without ever treating the text as HTML
 function highlightMatches(text: string, query: string) {
@@ -555,11 +1107,20 @@ searchInput.addEventListener("input", () => {
   }, 200);
 });
 
+// the open lecture is gone (deleted), so clear the player and the transcript
+function forgetOpenLecture() {
+  player.pause();
+  player.removeAttribute("src");
+  currentPath = "";
+  segments = [];
+  playback.hidden = true;
+}
+
 exportButton.addEventListener("click", async () => {
   try {
     const exportedPath = await invoke<string>("export_lecture", {
       path: currentPath,
-      title: `Lecture, ${lectureTitle.textContent}`,
+      title: `${lectureTitle.textContent}, ${lectureWhen.textContent}`,
     });
     // just the file name, the full path has your Mac username in it
     const fileName = exportedPath.split("/").pop();

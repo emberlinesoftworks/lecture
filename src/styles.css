@@ -99,7 +99,7 @@ button {
   gap: 14px;
   min-width: 0;
   padding: 0 12px 20px;
-  overflow: hidden auto;
+  overflow: hidden;
   border-right: 1px solid var(--line);
   background: var(--bg-elevated);
 }
@@ -232,6 +232,21 @@ button {
   box-shadow: 0 0 0 3px rgba(255, 90, 31, 0.18);
 }
 
+/* the lectures scroll on their own. it reaches out to the sidebar's edge so the scrollbar
+   sits there, and the last bit fades out so it's clear there's more below */
+.sidebar-scroll {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0 -12px;
+  padding: 0 12px 24px;
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - 24px), transparent);
+}
+
 .lecture-list,
 .search-results {
   display: flex;
@@ -302,6 +317,273 @@ button {
   letter-spacing: 0.02em;
 }
 
+/* --- organizing the list --- */
+
+.text-button {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition:
+    color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out),
+    transform 160ms var(--ease-out);
+}
+
+.text-button:active {
+  transform: scale(0.96);
+}
+
+.text-button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .text-button:hover {
+    color: var(--text);
+  }
+}
+
+.edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: calc(var(--sidebar-width) - 24px);
+  padding: 0 4px;
+}
+
+.edit-bar[hidden] {
+  display: none;
+}
+
+.folder {
+  border-radius: 9px;
+  transition: background 160ms var(--ease-out);
+}
+
+.folder-header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+}
+
+.folder-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 8px 8px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-toggle svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 200ms var(--ease-out);
+}
+
+.folder-toggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.folder-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-count {
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .folder-toggle:hover {
+    background: var(--bg-elevated-2);
+  }
+}
+
+/* the lectures in a folder hang off a thin line, like a tree */
+.folder-lectures {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 4px 13px;
+  padding: 0 0 0 6px;
+  border-left: 1px solid var(--line);
+  list-style: none;
+}
+
+.folder-lectures[hidden] {
+  display: none;
+}
+
+.lecture-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  border-radius: 8px;
+  cursor: grab;
+}
+
+.lecture-row {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* the gap the lecture will land in, it moves through the list while dragging */
+.lecture-row.drop-slot {
+  border-radius: 8px;
+  background: rgba(255, 90, 31, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(255, 90, 31, 0.45);
+}
+
+.lecture-row.drop-slot > * {
+  visibility: hidden;
+}
+
+/* the copy that follows the mouse */
+.drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  margin: 0;
+  background: var(--bg-elevated-2);
+  box-shadow:
+    inset 0 0 0 1px var(--line-strong),
+    0 12px 28px -8px rgba(0, 0, 0, 0.75);
+  list-style: none;
+  pointer-events: none;
+  cursor: grabbing;
+  will-change: transform;
+}
+
+body.dragging-lecture,
+body.dragging-lecture * {
+  cursor: grabbing !important;
+}
+
+.drag-handle svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: var(--text-faint);
+}
+
+.edit-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rename-button {
+  overflow: hidden;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .rename-button:hover {
+    background: var(--bg-elevated-2);
+  }
+}
+
+.edit-text .lecture-details {
+  padding-left: 4px;
+}
+
+.lecture-details {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.inline-input:focus-visible {
+  outline: none;
+}
+
+.move-button {
+  position: relative;
+  flex: none;
+}
+
+.move-button[hidden] {
+  display: none;
+}
+
+/* the actual menu, invisible, covering the icon */
+.move-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.move-button:focus-within {
+  outline: 2px solid var(--accent-hot);
+}
+
+/* a delete button asking "are you sure" */
+.icon-button.confirming {
+  width: auto;
+  padding: 0 8px;
+  border-color: #ff8a5c;
+  color: #ff8a5c;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .search-text {
   color: var(--text-muted);
   font-size: 13px;
@@ -324,13 +606,10 @@ button {
 
 /* which speech model is in use, pinned to the bottom of the sidebar */
 .model-button {
-  /* stays stuck to the bottom even when the lecture list scrolls,
-     the negative bottom covers the sidebar's padding so nothing peeks out underneath */
-  position: sticky;
-  bottom: -20px;
   flex: none;
   min-width: calc(var(--sidebar-width) - 24px);
-  margin: auto -12px -20px;
+  /* reaches the sidebar's edges and bottom so the line above it goes all the way across */
+  margin: 0 -12px -20px;
   padding: 12px 24px 20px;
   border: 0;
   border-top: 1px solid var(--line);
@@ -822,9 +1101,25 @@ button {
   margin-bottom: 14px;
 }
 
-.lecture-title {
+.lecture-heading {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
+}
+
+.lecture-when {
+  margin: 0;
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-stretch: 85%;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.lecture-title {
   margin: 0;
   font-family: var(--font-display);
   font-size: 20px;
@@ -835,7 +1130,8 @@ button {
 
 .playback-actions {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   gap: 8px;
 }
 

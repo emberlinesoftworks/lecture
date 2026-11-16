@@ -27,6 +27,7 @@
             <rect class="brand-spark" x="72" y="35" width="10" height="10" />
           </svg>
           <span class="brand-name">Lecture</span>
+          <button id="edit-list" class="text-button" type="button" aria-pressed="false">Edit</button>
           <button id="collapse" class="icon-button" type="button" aria-label="Hide sidebar" title="Hide sidebar (⌘\)">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 5 7.5 10l5 5" /></svg>
           </button>
@@ -45,9 +46,17 @@
           />
         </label>
 
-        <ul id="lecture-list" class="lecture-list"></ul>
-        <ul id="search-results" class="search-results" hidden></ul>
-        <p id="sidebar-empty" class="sidebar-empty" hidden></p>
+        <!-- only while editing the list -->
+        <div id="edit-bar" class="edit-bar" hidden>
+          <button id="new-folder" class="text-button" type="button">New folder</button>
+        </div>
+
+        <!-- only this part scrolls, so the header, search and Edit stay where they are -->
+        <div class="sidebar-scroll">
+          <ul id="lecture-list" class="lecture-list"></ul>
+          <ul id="search-results" class="search-results" hidden></ul>
+          <p id="sidebar-empty" class="sidebar-empty" hidden></p>
+        </div>
 
         <button id="model-button" class="model-button" type="button" hidden>
           Speech model: <span id="model-name"></span>
@@ -121,7 +130,10 @@
 
         <section id="playback" class="playback" hidden>
           <div class="playback-header">
-            <h2 id="lecture-title" class="lecture-title"></h2>
+            <div class="lecture-heading">
+              <h2 id="lecture-title" class="lecture-title"></h2>
+              <p id="lecture-when" class="lecture-when"></p>
+            </div>
             <div class="playback-actions">
               <button id="retranscribe" class="export-button" type="button" title="Run this lecture through the speech model again">Transcribe again</button>
               <button id="export" class="export-button" type="button">Export</button>
