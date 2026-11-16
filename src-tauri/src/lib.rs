@@ -173,6 +173,14 @@ fn mark_moment(app: tauri::AppHandle) -> Result<(), String> {
     add_mark(&app)
 }
 
+// sends how far whisper has gotten to the window, for the progress in the status line
+fn progress_reporter(app: &tauri::AppHandle) -> transcriber::ProgressReport {
+    let app = app.clone();
+    std::sync::Arc::new(move |done_ms| {
+        let _ = app.emit("transcribe-progress", done_ms);
+    })
+}
+
 #[tauri::command]
 async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Result<Transcript, String> {
     let model_path = model_path(&app)?;
@@ -182,8 +190,9 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
 
     // whisper takes a while, so run it off the main thread to keep the window responsive
     let wav_path = lecture_file(&app, &path)?;
+    let progress_app = app.clone();
     let lines = tauri::async_runtime::spawn_blocking(move || {
-        transcriber::transcribe(&model_path, &wav_path)
+        transcriber::transcribe(&model_path, &wav_path, progress_reporter(&progress_app))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -194,6 +203,43 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
     };
 
     save_transcript(&lecture_file(&app, &path)?, &transcript)?;
+    Ok(transcript)
+}
+
+// runs a saved lecture through the current model again (after a fix to transcription,
+// or after switching to the more accurate model). the old transcript is kept
+// next to it as .before.json in case the new one is worse
+#[tauri::command]
+async fn retranscribe(app: tauri::AppHandle, path: String) -> Result<Transcript, String> {
+    let model_path = model_path(&app)?;
+    if !model_path.exists() {
+        return Err("Download a speech model first".into());
+    }
+
+    let wav_path = lecture_file(&app, &path)?;
+    let marks: Vec<u64> = std::fs::read_to_string(wav_path.with_extension("marks.json"))
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+
+    let transcript_path = wav_path.with_extension("json");
+    if transcript_path.exists() {
+        std::fs::copy(&transcript_path, wav_path.with_extension("before.json")).map_err(|e| e.to_string())?;
+    }
+
+    let audio_path = wav_path.clone();
+    let progress_app = app.clone();
+    let lines = tauri::async_runtime::spawn_blocking(move || {
+        transcriber::transcribe(&model_path, &audio_path, progress_reporter(&progress_app))
+    })
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let transcript = Transcript {
+        marks: marks::marked_ranges(&lines, &marks),
+        lines,
+    };
+    save_transcript(&wav_path, &transcript)?;
     Ok(transcript)
 }
 
@@ -278,6 +324,7 @@ pub fn run() {
             mark_moment,
             mic_level,
             transcribe,
+            retranscribe,
             list_lectures,
             open_lecture,
             search_lectures,

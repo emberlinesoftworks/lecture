@@ -13,7 +13,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let lines = transcriber::transcribe(Path::new(&args[1]), Path::new(&args[2]))
+    // no progress needed here
+    let lines = transcriber::transcribe(Path::new(&args[1]), Path::new(&args[2]), std::sync::Arc::new(|_| {}))
         .expect("transcription failed");
 
     println!("\nTranscript:");

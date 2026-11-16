@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use whisper_rs::{
@@ -33,10 +33,14 @@ pub struct Segment {
     pub pause_before_ms: i64,
 }
 
+// tells the window how far into the recording whisper has gotten, in ms
+pub type ProgressReport = Arc<dyn Fn(i64) + Send + Sync>;
+
 // transcribes a whole recording from its file
-pub fn transcribe(model_path: &Path, wav_path: &Path) -> Result<Vec<Segment>, String> {
+pub fn transcribe(model_path: &Path, wav_path: &Path, on_progress: ProgressReport) -> Result<Vec<Segment>, String> {
     let audio = load_audio(wav_path)?;
-    Transcriber::load(model_path)?.transcribe_audio(&audio, 0)
+    let transcriber = Transcriber::load(model_path)?;
+    transcribe_audio(&transcriber.context, transcriber.voice_detector.as_ref(), &audio, Some(on_progress))
 }
 
 // keeps the model loaded so it can transcribe piece after piece during a class
@@ -57,7 +61,7 @@ impl Transcriber {
     // turns 16k mono audio into lines. start_ms is where this audio
     // begins in the recording, so the times line up with the whole file
     pub fn transcribe_audio(&self, audio: &[f32], start_ms: i64) -> Result<Vec<Segment>, String> {
-        let mut lines = transcribe_audio(&self.context, self.voice_detector.as_ref(), audio)?;
+        let mut lines = transcribe_audio(&self.context, self.voice_detector.as_ref(), audio, None)?;
         for line in &mut lines {
             line.start_ms += start_ms;
             line.end_ms += start_ms;
@@ -103,6 +107,7 @@ fn transcribe_audio(
     context: &WhisperContext,
     voice_detector: Option<&Mutex<WhisperVadContext>>,
     audio: &[f32],
+    on_progress: Option<ProgressReport>,
 ) -> Result<Vec<Segment>, String> {
     // cut long silences down before whisper sees the audio.
     // the times get mapped back to the real recording below
@@ -119,11 +124,26 @@ fn transcribe_audio(
     // same settings we tested with whisper-cli: english, beam search of 5
     let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
     params.set_language(Some("en"));
+    // don't feed whisper its own last 30 seconds as context. once it writes a stretch
+    // without punctuation it keeps going that way (real class, Nov 16: whole minutes
+    // with no periods), and starting each window fresh breaks that
+    params.set_no_context(true);
     params.set_token_timestamps(true);
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
     params.set_print_special(false);
+
+    // whisper reports percent of the audio it was given, which is the squeezed audio,
+    // so turn that back into a spot in the real recording
+    if let Some(report) = on_progress {
+        let squeezed_ms = squeezed.len() as i64 * 1000 / WHISPER_SAMPLE_RATE as i64;
+        let progress_pieces = pieces.clone();
+        params.set_progress_callback_safe(move |percent: i32| {
+            let ms = squeezed_ms * percent as i64 / 100;
+            report(if progress_pieces.is_empty() { ms } else { original_ms(&progress_pieces, ms) });
+        });
+    }
 
     state.full(params, &squeezed).map_err(|e| format!("transcription failed: {e}"))?;
 
@@ -173,8 +193,10 @@ fn transcribe_audio(
     // whisper sometimes "hears" a few words in silence (the classic one is "Thank you.").
     // a short line that starts in silence was made up, so drop it
     lines.retain(|line| !(word_count(&line.text) <= 3 && mostly_quiet(&quiet_frames, line.start_ms, 800)));
+    // a line that was only a ">>" is empty now
+    lines.retain(|line| !line.text.is_empty());
 
-    Ok(lines)
+    Ok(join_tiny_lines(lines))
 }
 
 const FRAME_MS: usize = 20;
@@ -271,7 +293,8 @@ fn build_lines(tokens: &[Token]) -> Vec<Segment> {
         start_ms.get_or_insert(token.start_ms);
         end_ms = token.end_ms;
         text.push_str(&token.text);
-        sentence_ended = ends_sentence(&token.text);
+        // look at the whole line so far, since "Dr" and "." can come as two tokens
+        sentence_ended = ends_sentence(&text);
     }
 
     if let Some(start_ms) = start_ms {
@@ -282,7 +305,8 @@ fn build_lines(tokens: &[Token]) -> Vec<Segment> {
 }
 
 fn make_line(text: &str, start_ms: i64, end_ms: i64, capitalize_it: bool) -> Segment {
-    let text = text.trim();
+    let text = clean_up(text);
+    let text = text.as_str();
     Segment {
         start_ms,
         end_ms,
@@ -292,8 +316,92 @@ fn make_line(text: &str, start_ms: i64, end_ms: i64, capitalize_it: bool) -> Seg
     }
 }
 
+// whisper sometimes spreads a few words' timings over a silence, which made lines like
+// "If" / "you're" / "not" / "sure, do you know the trick" (real class, Nov 16).
+// a line this short that isn't a sentence by itself goes back with its neighbor
+const TINY_LINE_WORDS: usize = 2;
+
+fn join_tiny_lines(lines: Vec<Segment>) -> Vec<Segment> {
+    let mut joined: Vec<Segment> = Vec::new();
+    // a tiny line that starts a sentence, waiting to go onto the front of the next line
+    let mut waiting: Option<Segment> = None;
+
+    for mut line in lines {
+        let tiny = word_count(&line.text) <= TINY_LINE_WORDS;
+
+        let had_waiting = waiting.is_some();
+        if let Some(earlier) = waiting.take() {
+            line.text = format!("{} {}", earlier.text, line.text);
+            line.start_ms = earlier.start_ms;
+            line.pause_before_ms = earlier.pause_before_ms;
+        }
+
+        if tiny {
+            // finishes the last line's sentence ("I forgot to put that in" / "here.")
+            if !had_waiting {
+                if let Some(previous) = joined.last_mut() {
+                    if !ends_sentence(&previous.text) {
+                        previous.text = format!("{} {}", previous.text, line.text);
+                        previous.end_ms = line.end_ms;
+                        continue;
+                    }
+                }
+            }
+            // starts a sentence that keeps going on the next line ("If" / "you're not sure")
+            if !ends_sentence(&line.text) {
+                waiting = Some(line);
+                continue;
+            }
+        }
+        joined.push(line);
+    }
+
+    joined.extend(waiting);
+    joined
+}
+
+// whisper writes ">>" when it thinks the speaker changed, which isn't something you want in your notes
+fn clean_up(text: &str) -> String {
+    let text = text.replace(">>", " ");
+    collapse_repeats(&text)
+}
+
+// whisper sometimes gets stuck saying the same word over and over
+// ("I'm, I'm, I'm, I'm, I'm, I'm, I'm about to"). a run of 5 or more becomes just the
+// first and last one. shorter runs stay, people really do say "three, three, three, three"
+const LONGEST_REPEAT: usize = 4;
+
+fn collapse_repeats(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let bare = |word: &str| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase();
+
+    let mut kept = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let mut run_end = i + 1;
+        while run_end < words.len() && bare(words[run_end]) == bare(words[i]) && !bare(words[i]).is_empty() {
+            run_end += 1;
+        }
+        if run_end - i > LONGEST_REPEAT {
+            kept.push(words[i]);
+            kept.push(words[run_end - 1]);
+        } else {
+            kept.extend_from_slice(&words[i..run_end]);
+        }
+        i = run_end;
+    }
+    kept.join(" ")
+}
+
+// "Dr." and friends end with a period but don't end the sentence
+const TITLES: [&str; 6] = ["dr.", "mr.", "mrs.", "ms.", "prof.", "st."];
+
 pub(crate) fn ends_sentence(text: &str) -> bool {
     let text = text.trim_end();
+    let last_word = text.split_whitespace().last().unwrap_or("").to_lowercase();
+    if TITLES.contains(&last_word.as_str()) {
+        return false;
+    }
     text.ends_with('.') || text.ends_with('?') || text.ends_with('!')
 }
 
@@ -394,6 +502,60 @@ mod tests {
         list.iter()
             .map(|&(text, start_ms, end_ms)| Token { text: text.to_string(), start_ms, end_ms })
             .collect()
+    }
+
+    fn line(start_ms: i64, text: &str) -> Segment {
+        Segment { start_ms, end_ms: start_ms + 1000, text: text.to_string(), pause_before_ms: 0 }
+    }
+
+    fn texts(lines: &[Segment]) -> Vec<String> {
+        lines.iter().map(|line| line.text.clone()).collect()
+    }
+
+    #[test]
+    fn one_word_lines_go_back_together() {
+        let lines = vec![
+            line(0, "And three divided into 44."),
+            line(5000, "If"),
+            line(6000, "you're"),
+            line(7000, "not"),
+            line(8000, "sure, do you know the trick for division of three?"),
+        ];
+        let joined = join_tiny_lines(lines);
+        assert_eq!(texts(&joined), ["And three divided into 44.", "If you're not sure, do you know the trick for division of three?"]);
+        // the joined line starts where "If" did
+        assert_eq!(joined[1].start_ms, 5000);
+    }
+
+    #[test]
+    fn a_tiny_line_finishes_the_sentence_before_it() {
+        let lines = vec![line(0, "Yeah, so okay I forgot to put that in"), line(9000, "here."), line(10_000, "Let's say with a function.")];
+        assert_eq!(texts(&join_tiny_lines(lines)), ["Yeah, so okay I forgot to put that in here.", "Let's say with a function."]);
+    }
+
+    #[test]
+    fn short_answers_stay_on_their_own() {
+        let lines = vec![line(0, "Will big M be one?"), line(2000, "One."), line(3000, "Negative one.")];
+        assert_eq!(texts(&join_tiny_lines(lines)), ["Will big M be one?", "One.", "Negative one."]);
+    }
+
+    #[test]
+    fn stuck_repeats_are_cut_down() {
+        assert_eq!(collapse_repeats("Well, I'm, I'm, I'm, I'm, I'm, I'm about to"), "Well, I'm, I'm about to");
+        // real counting stays
+        assert_eq!(collapse_repeats("divided by three, three, three, three, 81"), "divided by three, three, three, three, 81");
+    }
+
+    #[test]
+    fn titles_dont_end_sentences() {
+        assert!(!ends_sentence("and go, Dr."));
+        assert!(ends_sentence("We're done with notes."));
+    }
+
+    #[test]
+    fn speaker_change_markers_are_removed() {
+        assert_eq!(clean_up(" >> Negative one."), "Negative one.");
+        assert_eq!(clean_up("one >> two"), "one two");
     }
 
     #[test]

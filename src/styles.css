@@ -763,6 +763,11 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* the mic isn't giving us anything, this needs to be noticed */
+.status.warning {
+  color: #ff8a5c;
+}
+
 .progress {
   min-height: 1.4em;
   margin: -14px 0 0;
@@ -777,6 +782,8 @@ button {
 /* --- playback + transcript --- */
 
 .playback {
+  /* lets the play bar fit itself to the space it has, not the window (the sidebar takes some) */
+  container-type: inline-size;
   width: 100%;
   max-width: 720px;
   margin-top: 44px;
@@ -808,19 +815,33 @@ button {
 
 .playback-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px 16px;
   margin-bottom: 14px;
 }
 
 .lecture-title {
+  flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   font-family: var(--font-display);
   font-size: 20px;
   font-weight: 600;
   font-stretch: 90%;
   letter-spacing: 0.01em;
+}
+
+.playback-actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.export-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .export-button {
@@ -956,7 +977,7 @@ button {
 .scrubber {
   position: relative;
   flex: 1;
-  min-width: 80px;
+  min-width: 0;
   height: 28px;
 }
 
@@ -1146,5 +1167,45 @@ button {
   .layout,
   .meter span {
     transition: none;
+  }
+}
+
+/* not much room: smaller buttons and numbers so everything still fits in the bar */
+@container (max-width: 480px) {
+  .player-bar {
+    gap: 4px;
+    padding: 6px 8px 6px 6px;
+  }
+
+  .player-play {
+    width: 36px;
+    height: 36px;
+  }
+
+  .player-skip {
+    width: 28px;
+    height: 28px;
+  }
+
+  .player-skip svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .player-time {
+    min-width: 0;
+    font-size: 12px;
+  }
+
+  .player-speed {
+    min-width: 0;
+    padding: 4px 8px;
+  }
+}
+
+/* really narrow: the skip buttons step aside (the arrow keys still skip on the bar) */
+@container (max-width: 260px) {
+  .player-skip {
+    display: none;
   }
 }

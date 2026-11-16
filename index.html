@@ -122,7 +122,10 @@
         <section id="playback" class="playback" hidden>
           <div class="playback-header">
             <h2 id="lecture-title" class="lecture-title"></h2>
-            <button id="export" class="export-button" type="button">Export</button>
+            <div class="playback-actions">
+              <button id="retranscribe" class="export-button" type="button" title="Run this lecture through the speech model again">Transcribe again</button>
+              <button id="export" class="export-button" type="button">Export</button>
+            </div>
           </div>
           <audio id="player" preload="metadata"></audio>
           <div class="player-bar">

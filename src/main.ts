@@ -51,6 +51,7 @@ const progressText = document.querySelector<HTMLElement>("#progress")!;
 const playback = document.querySelector<HTMLElement>("#playback")!;
 const lectureTitle = document.querySelector<HTMLElement>("#lecture-title")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#export")!;
+const retranscribeButton = document.querySelector<HTMLButtonElement>("#retranscribe")!;
 const player = document.querySelector<HTMLAudioElement>("#player")!;
 const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
 const playButton = document.querySelector<HTMLButtonElement>("#play")!;
@@ -89,6 +90,7 @@ let audioContext: AudioContext | undefined;
 let segments: Segment[] = [];
 let lineButtons: HTMLButtonElement[] = [];
 let markStarts: number[] = [];
+
 let scrubbing = false;
 let speedIndex = 0;
 const playbackSpeeds = [1, 1.25, 1.5, 1.75, 2, 0.75];
@@ -125,6 +127,9 @@ function recordedAtFromPath(path: string) {
 }
 
 function setRecording(isRecording: boolean) {
+  silentSince = 0;
+  micWarningShowing = false;
+  statusText.classList.remove("warning");
   document.body.classList.toggle("recording-active", isRecording);
   recordButton.classList.toggle("recording", isRecording);
   recordButton.setAttribute("aria-pressed", String(isRecording));
@@ -148,8 +153,35 @@ for (let i = 0; i < 40; i++) {
   meterBars.push(bar);
 }
 
+// if the mic hands over pure silence for this long, something's wrong (muted, unplugged,
+// or macOS stopped giving the app the mic). a quiet room still has a little noise in it
+const SILENT_WARNING_MS = 8000;
+let silentSince = 0;
+let micWarningShowing = false;
+
+function checkForSilence(level: number) {
+  if (level > 0.0005) {
+    silentSince = 0;
+    if (micWarningShowing) {
+      micWarningShowing = false;
+      statusText.classList.remove("warning");
+      statusText.textContent = "Recording. Press ⌥⌘M anytime to mark a moment";
+    }
+    return;
+  }
+
+  silentSince ||= Date.now();
+  if (!micWarningShowing && Date.now() - silentSince > SILENT_WARNING_MS) {
+    micWarningShowing = true;
+    statusText.classList.add("warning");
+    statusText.textContent =
+      "Lecture isn't hearing anything. Check your microphone in System Settings → Sound, and that this app is allowed in Privacy & Security → Microphone";
+  }
+}
+
 async function updateMeter() {
   const level = await invoke<number>("mic_level");
+  checkForSilence(level);
   // square root so quiet speech still moves the bars
   const height = Math.max(0.08, Math.min(1, Math.sqrt(level) * 1.3));
 
@@ -259,6 +291,12 @@ function showTranscript(audioPath: string, transcript: Transcript) {
     }
     lineButtons[range.first_line]?.classList.add("marked");
     lineButtons[range.first_line]?.setAttribute("title", `You marked this at ${formatTime(range.mark_ms)}`);
+  }
+
+  // a recording with nothing in it would otherwise just leave a blank screen
+  if (segments.length === 0) {
+    statusText.textContent =
+      "Nothing was heard in this recording, so there's no transcript. If someone was talking, check your microphone in System Settings → Sound";
   }
 
   lectureTitle.textContent = formatDate(recordedAtFromPath(audioPath));
@@ -392,8 +430,8 @@ async function openLecture(path: string, jumpToLine?: number) {
     const transcript = await invoke<Transcript>("open_lecture", { path });
     // opening a lecture from the sidebar closes the model screen (unless there's no model yet)
     if (!setup.hidden && modelStatus?.current) hideSetup();
-    showTranscript(path, transcript);
     statusText.textContent = "";
+    showTranscript(path, transcript);
 
     if (jumpToLine !== undefined) {
       lineButtons[jumpToLine]?.scrollIntoView({ block: "center" });
@@ -523,24 +561,70 @@ exportButton.addEventListener("click", async () => {
       path: currentPath,
       title: `Lecture, ${lectureTitle.textContent}`,
     });
-    statusText.textContent = `Exported to ${exportedPath}`;
+    // just the file name, the full path has your Mac username in it
+    const fileName = exportedPath.split("/").pop();
+    statusText.textContent = `Exported ${fileName}, it's open in Finder`;
   } catch (error) {
     statusText.textContent = String(error);
+  }
+});
+
+// whisper reports how far it has gotten while transcribing a saved lecture
+let transcribingTotalMs = 0;
+let transcribingLabel = "";
+
+listen<number>("transcribe-progress", (event) => {
+  if (!transcribingLabel) return;
+  const done = Math.min(event.payload, transcribingTotalMs);
+  statusText.textContent = `${transcribingLabel}: ${formatTime(done)} of ${formatTime(transcribingTotalMs)}`;
+});
+
+// runs the lecture through the speech model again, the old transcript is kept as .before.json
+retranscribeButton.addEventListener("click", async () => {
+  const path = currentPath;
+  retranscribeButton.disabled = true;
+  recordButton.disabled = true;
+  retranscribeButton.textContent = "Transcribing...";
+  statusText.textContent = "Transcribing this lecture again. A 75 minute class takes about 6 to 8 minutes";
+  transcribingTotalMs = player.duration > 0 ? player.duration * 1000 : (segments[segments.length - 1]?.end_ms ?? 0);
+  transcribingLabel = "Transcribing again";
+  const started = Date.now();
+
+  try {
+    const transcript = await invoke<Transcript>("retranscribe", { path });
+    transcribingLabel = "";
+    // only show it if they're still looking at the same lecture
+    if (currentPath === path) showTranscript(path, transcript);
+    const seconds = Math.round((Date.now() - started) / 1000);
+    statusText.textContent = `Transcribed again in ${seconds}s. The old version is saved next to it as .before.json`;
+    await refreshLectureList();
+  } catch (error) {
+    transcribingLabel = "";
+    statusText.textContent = String(error);
+  } finally {
+    retranscribeButton.disabled = false;
+    recordButton.disabled = false;
+    retranscribeButton.textContent = "Transcribe again";
   }
 });
 
 // --- recording ---
 
 // only needed if it couldn't transcribe during class (like if the model wasn't installed yet)
-async function transcribe(path: string, marks: number[]) {
+async function transcribe(path: string, marks: number[], totalMs: number) {
   statusText.textContent = "Transcribing...";
+  transcribingTotalMs = totalMs;
+  transcribingLabel = "Transcribing";
   const started = Date.now();
 
-  const transcript = await invoke<Transcript>("transcribe", { path, marks });
-
-  const seconds = Math.round((Date.now() - started) / 1000);
-  statusText.textContent = `Transcribed in ${seconds}s`;
-  showTranscript(path, transcript);
+  try {
+    const transcript = await invoke<Transcript>("transcribe", { path, marks });
+    const seconds = Math.round((Date.now() - started) / 1000);
+    statusText.textContent = `Transcribed in ${seconds}s`;
+    showTranscript(path, transcript);
+  } finally {
+    transcribingLabel = "";
+  }
 }
 
 markButton.addEventListener("click", () => {
@@ -556,6 +640,7 @@ recordButton.addEventListener("click", async () => {
     if (isRecording) {
       // stop recording. most of it is already transcribed, this just finishes the last bit
       clearInterval(timerInterval);
+      const recordedMs = Date.now() - startTime;
       statusText.textContent = "Finishing the transcript...";
       const stopped = await invoke<StoppedRecording>("stop_recording");
       setRecording(false);
@@ -566,7 +651,7 @@ recordButton.addEventListener("click", async () => {
         statusText.textContent = `Transcript ready${markNote}`;
         showTranscript(stopped.path, stopped.transcript);
       } else {
-        await transcribe(stopped.path, stopped.marks);
+        await transcribe(stopped.path, stopped.marks, recordedMs);
       }
       await refreshLectureList();
     } else {

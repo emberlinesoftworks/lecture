@@ -44,6 +44,14 @@ pub fn load_transcript(wav_path: &Path) -> Result<Transcript, String> {
     Ok(Transcript { lines, marks: Vec::new() })
 }
 
+// how long the recording really is, from the wav header (only reads a few bytes).
+// the last line's end time can be off by a few seconds since nothing is said at the very end
+fn audio_length_ms(wav_path: &Path) -> Option<i64> {
+    let reader = hound::WavReader::open(wav_path).ok()?;
+    let rate = reader.spec().sample_rate as i64;
+    (rate > 0).then(|| reader.duration() as i64 * 1000 / rate)
+}
+
 // every recording in the folder that has a transcript, newest first
 pub fn list_lectures(folder: &Path) -> Vec<LectureSummary> {
     let mut lectures: Vec<LectureSummary> = lecture_files(folder)
@@ -53,7 +61,8 @@ pub fn list_lectures(folder: &Path) -> Vec<LectureSummary> {
             Some(LectureSummary {
                 path: wav_path.display().to_string(),
                 recorded_at: recorded_at(&wav_path),
-                duration_ms: transcript.lines.last().map(|line| line.end_ms).unwrap_or(0),
+                duration_ms: audio_length_ms(&wav_path)
+                    .unwrap_or_else(|| transcript.lines.last().map(|line| line.end_ms).unwrap_or(0)),
                 preview: transcript.lines.first().map(|line| line.text.clone()).unwrap_or_default(),
                 mark_count: transcript.marks.len(),
             })
