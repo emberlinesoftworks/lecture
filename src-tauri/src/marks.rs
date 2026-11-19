@@ -60,6 +60,7 @@ mod tests {
             end_ms: start_ms + 3000,
             text: String::new(),
             pause_before_ms,
+            ..Default::default()
         }
     }
 

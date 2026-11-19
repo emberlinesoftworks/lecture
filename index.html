@@ -48,6 +48,7 @@
 
         <!-- only while editing the list -->
         <div id="edit-bar" class="edit-bar" hidden>
+          <button id="new-course" class="text-button" type="button">New course</button>
           <button id="new-folder" class="text-button" type="button">New folder</button>
         </div>
 
@@ -114,6 +115,47 @@
           </div>
         </section>
 
+        <!-- a course: its subject and the words whisper keeps getting wrong -->
+        <section id="course-page" class="course-page" hidden>
+          <div class="course-top">
+            <button id="course-back" class="text-button" type="button">Back</button>
+          </div>
+          <h1 id="course-name" class="course-name"></h1>
+
+          <label class="course-field">
+            <span>Subject</span>
+            <select id="course-subject">
+              <option value="">None</option>
+              <option value="math">Math</option>
+              <option value="physics">Physics</option>
+              <option value="chemistry">Chemistry</option>
+              <option value="biology">Biology</option>
+              <option value="nursing">Nursing</option>
+              <option value="computer science">Computer science</option>
+              <option value="history">History</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+
+          <div class="course-words">
+            <h2 class="course-heading">Word fixes</h2>
+            <form id="word-form" class="word-form">
+              <label>
+                <span>Lecture wrote</span>
+                <input id="heard-input" type="text" autocomplete="off" spellcheck="false" />
+              </label>
+              <label>
+                <span>Should say</span>
+                <input id="word-input" type="text" autocomplete="off" spellcheck="false" />
+              </label>
+              <button class="download-button" type="submit">Add</button>
+            </form>
+            <p class="course-tip">Separate more than one with commas</p>
+            <ul id="word-list" class="word-list"></ul>
+            <p id="course-status" class="course-status" role="status"></p>
+          </div>
+        </section>
+
         <section id="recorder" class="recorder">
           <p id="timer" class="timer">00:00</p>
           <div id="meter" class="meter" aria-hidden="true"></div>
@@ -121,6 +163,12 @@
             <span class="dot" aria-hidden="true"></span>
             <span class="label">Record</span>
           </button>
+          <label id="record-into-label" class="record-into" hidden>
+            Save to
+            <select id="record-into">
+              <option value="">Lectures</option>
+            </select>
+          </label>
           <button id="mark" class="mark-button" type="button" hidden>
             Mark this moment <kbd>⌥⌘M</kbd>
           </button>
@@ -168,6 +216,7 @@
             <button id="speed" class="player-speed" type="button" aria-label="Playback speed" title="Playback speed">1×</button>
           </div>
           <ol id="transcript" class="transcript"></ol>
+          <button id="back-to-playing" class="text-button back-to-playing" type="button" hidden>Back to playing</button>
         </section>
       </main>
     </div>

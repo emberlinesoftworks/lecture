@@ -1,5 +1,9 @@
 pub mod cooling;
+pub mod courses;
+pub mod crosscheck;
+pub mod dictionary;
 pub mod lectures;
+pub mod mathtext;
 pub mod live;
 pub mod marks;
 pub mod models;
@@ -51,6 +55,24 @@ fn model_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 // saves the transcript next to the recording
+// puts a new transcript together: the course's word fixes (if the lecture is in a course
+// folder), then where the marks land
+fn make_transcript(
+    wav_path: &std::path::Path,
+    title: Option<String>,
+    mut lines: Vec<transcriber::Segment>,
+    marks: &[u64],
+) -> Transcript {
+    courses::fix_words(&words_for(wav_path), &mut lines);
+    Transcript { title, marks: marks::marked_ranges(&lines, marks), lines }
+}
+
+// the words to fix in a lecture: its course's own, plus the built in ones for the course's subject
+fn words_for(wav_path: &std::path::Path) -> courses::Course {
+    let course = lectures::course_for(wav_path).map(|folder| courses::load_course(&folder)).unwrap_or_default();
+    dictionary::with_built_in(&course)
+}
+
 fn save_transcript(wav_path: &std::path::Path, transcript: &Transcript) -> Result<(), String> {
     let json = serde_json::to_string_pretty(transcript).map_err(|e| e.to_string())?;
     std::fs::write(wav_path.with_extension("json"), json).map_err(|e| e.to_string())
@@ -62,40 +84,48 @@ fn lecture_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 // only touch files in the Lecture folder, whatever path the window sends
-// (lectures can also be one folder down, like Lecture/Math 172/lecture-123.wav)
+// (lectures can be up to two folders down, like Lecture/Math 172/Homework/lecture-123.wav)
 fn lecture_file(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
     let folder = lecture_folder(app)?;
     let path = PathBuf::from(path);
     let sneaky = path.components().any(|part| matches!(part, std::path::Component::ParentDir));
-    let parent = path.parent();
-    let in_lecture_folder = parent == Some(folder.as_path()) || parent.and_then(|p| p.parent()) == Some(folder.as_path());
-    if sneaky || !in_lecture_folder {
+    let depth = path.strip_prefix(&folder).map(|inside| inside.components().count()).unwrap_or(0);
+    if sneaky || !(1..=3).contains(&depth) {
         return Err("That file isn't in the Lecture folder".into());
     }
     Ok(path)
 }
 
-// a folder inside the Lecture folder, by name. none means the Lecture folder itself
-fn lecture_subfolder(app: &tauri::AppHandle, name: Option<&str>) -> Result<PathBuf, String> {
+// a course or folder inside the Lecture folder, like "Math 172/Homework".
+// none means the Lecture folder itself
+fn lecture_subfolder(app: &tauri::AppHandle, place: Option<&str>) -> Result<PathBuf, String> {
     let root = lecture_folder(app)?;
-    match name {
-        Some(name) => Ok(root.join(lectures::check_folder_name(name)?)),
+    match place {
+        Some(place) => Ok(root.join(lectures::check_place(place)?)),
         None => Ok(root),
     }
 }
 
+// a course's own folder (courses are always at the top)
+fn course_folder(app: &tauri::AppHandle, course: &str) -> Result<PathBuf, String> {
+    let folder = lecture_folder(app)?.join(lectures::check_folder_name(course)?);
+    if !lectures::is_course(&folder) {
+        return Err(format!("{course} isn't a course"));
+    }
+    Ok(folder)
+}
+
 #[tauri::command]
-fn start_recording(app: tauri::AppHandle, state: State<AppState>) -> Result<String, String> {
+fn start_recording(app: tauri::AppHandle, state: State<AppState>, folder: Option<String>) -> Result<String, String> {
     let mut recording = state.recording.lock().unwrap();
     if recording.is_some() {
         return Err("Already recording".into());
     }
 
-    // make sure Documents/Lecture exists
-    let lecture_folder = lecture_folder(&app)?;
+    // make sure the folder exists (Documents/Lecture, or a course folder in it)
+    let lecture_folder = lecture_subfolder(&app, folder.as_deref())?;
     std::fs::create_dir_all(&lecture_folder).map_err(|e| e.to_string())?;
 
-    // TODO: name files by course and date once courses exist
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let path = lecture_folder.join(format!("lecture-{timestamp}.wav"));
 
@@ -142,11 +172,7 @@ async fn stop_recording(state: State<'_, AppState>) -> Result<StoppedRecording, 
 
     let transcript = match lines {
         Some(lines) => {
-            let transcript = Transcript {
-                title: None,
-                marks: marks::marked_ranges(&lines, &marks),
-                lines,
-            };
+            let transcript = make_transcript(&path, None, lines, &marks);
             save_transcript(&path, &transcript)?;
             Some(transcript)
         }
@@ -211,11 +237,7 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
     .await
     .map_err(|e| e.to_string())??;
 
-    let transcript = Transcript {
-        title: None,
-        marks: marks::marked_ranges(&lines, &marks),
-        lines,
-    };
+    let transcript = make_transcript(&lecture_file(&app, &path)?, None, lines, &marks);
 
     save_transcript(&lecture_file(&app, &path)?, &transcript)?;
     Ok(transcript)
@@ -253,11 +275,7 @@ async fn retranscribe(app: tauri::AppHandle, path: String) -> Result<Transcript,
         .await
         .map_err(|e| e.to_string())??;
 
-    let transcript = Transcript {
-        title,
-        marks: marks::marked_ranges(&lines, &marks),
-        lines,
-    };
+    let transcript = make_transcript(&wav_path, title, lines, &marks);
     save_transcript(&wav_path, &transcript)?;
     Ok(transcript)
 }
@@ -280,35 +298,231 @@ fn move_lecture(app: tauri::AppHandle, path: String, folder: Option<String>) -> 
     Ok(new_path.display().to_string())
 }
 
+// the subject and word list for a course folder
+#[tauri::command]
+fn course_settings(app: tauri::AppHandle, folder: String) -> Result<courses::Course, String> {
+    Ok(courses::load_course(&course_folder(&app, &folder)?))
+}
+
+// saves it, then fixes the words in the lectures already in the folder. returns how many changed
+#[tauri::command]
+fn save_course(app: tauri::AppHandle, folder: String, course: courses::Course) -> Result<usize, String> {
+    let folder = course_folder(&app, &folder)?;
+    courses::save_course(&folder, &course)?;
+    lectures::fix_words_in_folder(&folder, &dictionary::with_built_in(&courses::load_course(&folder)))
+}
+
 // folder: none is the main list. files: the recordings' file names, top to bottom
 #[tauri::command]
 fn save_order(app: tauri::AppHandle, folder: Option<String>, files: Vec<String>) -> Result<(), String> {
-    if let Some(name) = &folder {
-        lectures::check_folder_name(name)?;
+    if let Some(place) = &folder {
+        lectures::check_place(place)?;
     }
     lectures::save_order(&lecture_folder(&app)?, folder.as_deref(), files)
 }
 
 #[tauri::command]
-fn list_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    Ok(lectures::list_folders(&lecture_folder(&app)?))
+fn list_places(app: tauri::AppHandle) -> Result<Vec<lectures::Place>, String> {
+    Ok(lectures::list_places(&lecture_folder(&app)?))
 }
 
+// a new course (always at the top) or folder (at the top, or inside a course or folder)
 #[tauri::command]
-fn create_folder(app: tauri::AppHandle, name: String) -> Result<String, String> {
+fn create_place(app: tauri::AppHandle, name: String, parent: Option<String>, course: bool) -> Result<String, String> {
     let root = lecture_folder(&app)?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    lectures::create_folder(&root, &name)
+    lectures::create_place(&root, parent.as_deref(), &name, course)
+}
+
+// turns a top level folder into a course (gives it a subject and word fixes)
+#[tauri::command]
+fn make_course(app: tauri::AppHandle, folder: String) -> Result<(), String> {
+    let path = lecture_folder(&app)?.join(lectures::check_folder_name(&folder)?);
+    if !path.is_dir() {
+        return Err(format!("{folder} isn't there anymore"));
+    }
+    if !lectures::is_course(&path) {
+        courses::save_course(&path, &courses::Course::default())?;
+    }
+    Ok(())
+}
+
+// turns a course back into a plain folder. its lectures stay put, the word fixes
+// already made to them stay too (the originals are still in .original.json)
+#[tauri::command]
+fn make_folder(app: tauri::AppHandle, folder: String) -> Result<(), String> {
+    let path = course_folder(&app, &folder)?;
+    std::fs::remove_file(path.join(".course.json")).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn rename_folder(app: tauri::AppHandle, name: String, new_name: String) -> Result<String, String> {
-    lectures::rename_folder(&lecture_folder(&app)?, &name, &new_name)
+fn rename_place(app: tauri::AppHandle, path: String, new_name: String) -> Result<String, String> {
+    lectures::rename_place(&lecture_folder(&app)?, &path, &new_name)
 }
 
 #[tauri::command]
-fn delete_folder(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    lectures::delete_folder(&lecture_folder(&app)?, &name)
+fn delete_place(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    lectures::delete_place(&lecture_folder(&app)?, &path)
+}
+
+// what fixing a word from the transcript did
+#[derive(serde::Serialize)]
+struct FixedWord {
+    transcript: Transcript,
+    // the course it went into (none when the lecture isn't in one, then only this lecture is fixed)
+    course: Option<String>,
+    // how many lectures changed
+    lectures: usize,
+}
+
+// double clicking a word in the transcript: fix it here, and in every lecture of the course if there is one
+#[tauri::command]
+fn fix_word(app: tauri::AppHandle, path: String, heard: String, word: String) -> Result<FixedWord, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let mut one_word = courses::Course::default();
+    courses::add_word(&mut one_word, &word, &heard)?;
+
+    // you're asking for it now, so a time you changed it back in this lecture doesn't count anymore
+    let mut transcript = lectures::load_transcript(&wav_path)?;
+    let heard_lower = heard.trim().to_lowercase();
+    for line in transcript.lines.iter_mut() {
+        line.kept.retain(|kept| *kept != heard_lower);
+    }
+    save_transcript(&wav_path, &transcript)?;
+
+    let Some(course_folder) = lectures::course_for(&wav_path) else {
+        let (transcript, changed) = lectures::fix_lecture(&wav_path, transcript, &one_word)?;
+        return Ok(FixedWord { transcript, course: None, lectures: changed as usize });
+    };
+
+    let mut course = courses::load_course(&course_folder);
+    courses::add_word(&mut course, &word, &heard)?;
+    courses::save_course(&course_folder, &course)?;
+    let lectures = lectures::fix_words_in_folder(&course_folder, &dictionary::with_built_in(&courses::load_course(&course_folder)))?;
+    Ok(FixedWord {
+        transcript: lectures::load_transcript(&wav_path)?,
+        course: course_folder.file_name().map(|name| name.to_string_lossy().into_owned()),
+        lectures,
+    })
+}
+
+// a word a course fix changed: put back what was heard (and leave it that way in this line)
+#[tauri::command]
+fn change_back_fix(app: tauri::AppHandle, path: String, line: usize, fix: usize) -> Result<Transcript, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let mut transcript = lectures::load_transcript(&wav_path)?;
+    let segment = transcript.lines.get_mut(line).ok_or("That line isn't there anymore")?;
+    courses::change_back(segment, fix)?;
+    save_transcript(&wav_path, &transcript)?;
+    Ok(transcript)
+}
+
+// the second opinion on unsure words, run after a transcript is ready.
+// uses whichever model you aren't using, if it's downloaded
+#[tauri::command]
+async fn cross_check(app: tauri::AppHandle, state: State<'_, AppState>, path: String) -> Result<Transcript, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let transcript = lectures::load_transcript(&wav_path)?;
+    // not during class, one model running is plenty
+    if state.recording.lock().unwrap().is_some() {
+        return Ok(transcript);
+    }
+    let folder = models_folder(&app)?;
+    let other = match models::current_choice(&folder) {
+        Some(models::Choice::Fast) => models::Choice::Accurate,
+        _ => models::Choice::Fast,
+    };
+    let other_model = folder.join(models::model_file(other).file_name);
+    if !other_model.exists() || transcript.lines.iter().all(|line| line.unsure.is_empty()) {
+        return Ok(transcript);
+    }
+
+    let lines = transcript.lines.clone();
+    let audio_path = wav_path.clone();
+    let results = tauri::async_runtime::spawn_blocking(move || crosscheck::second_opinion(&other_model, &audio_path, &lines))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    // you might have fixed words while it was listening, so only lines that haven't changed get updated
+    let mut latest = lectures::load_transcript(&wav_path)?;
+    for ((now, before), result) in latest.lines.iter_mut().zip(&transcript.lines).zip(results) {
+        if let Some(unsure) = result {
+            if now.text == before.text {
+                now.unsure = unsure;
+            }
+        }
+    }
+    save_transcript(&wav_path, &latest)?;
+    Ok(latest)
+}
+
+// that word is right after all, so it doesn't need the gray underline
+#[tauri::command]
+fn sure_now(app: tauri::AppHandle, path: String, line: usize, word: usize) -> Result<Transcript, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let mut transcript = lectures::load_transcript(&wav_path)?;
+    let segment = transcript.lines.get_mut(line).ok_or("That line isn't there anymore")?;
+    if word < segment.unsure.len() {
+        segment.unsure.remove(word);
+    }
+    save_transcript(&wav_path, &transcript)?;
+    Ok(transcript)
+}
+
+// each line with its math written out, for lectures in a math course (none for anything else)
+#[tauri::command]
+fn math_view(app: tauri::AppHandle, path: String) -> Result<Option<Vec<String>>, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    if !lectures::is_math(&wav_path) {
+        return Ok(None);
+    }
+    let transcript = lectures::load_transcript(&wav_path)?;
+    Ok(Some(transcript.lines.iter().map(|line| mathtext::to_math(&line.text)).collect()))
+}
+
+// hides lines (a side conversation, a name) or brings them back
+#[tauri::command]
+fn hide_lines(app: tauri::AppHandle, path: String, first: usize, last: usize, hidden: bool) -> Result<Transcript, String> {
+    lectures::set_hidden(&lecture_file(&app, &path)?, first, last, hidden)
+}
+
+// every fix that became this word was right
+#[tauri::command]
+fn keep_all_fixes(app: tauri::AppHandle, path: String, word: String) -> Result<Transcript, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let mut transcript = lectures::load_transcript(&wav_path)?;
+    courses::keep_all(&mut transcript.lines, &word);
+    save_transcript(&wav_path, &transcript)?;
+    Ok(transcript)
+}
+
+// changes just the spot you double clicked, nothing else
+#[tauri::command]
+fn change_one_word(
+    app: tauri::AppHandle,
+    path: String,
+    line: usize,
+    near: usize,
+    heard: String,
+    word: String,
+) -> Result<Transcript, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let mut transcript = lectures::load_transcript(&wav_path)?;
+    let segment = transcript.lines.get_mut(line).ok_or("That line isn't there anymore")?;
+    courses::change_one(segment, near, &heard, &word)?;
+    save_transcript(&wav_path, &transcript)?;
+    Ok(transcript)
+}
+
+// the fix was right, stop underlining it
+#[tauri::command]
+fn keep_fix(app: tauri::AppHandle, path: String, line: usize, fix: usize) -> Result<Transcript, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let mut transcript = lectures::load_transcript(&wav_path)?;
+    let segment = transcript.lines.get_mut(line).ok_or("That line isn't there anymore")?;
+    courses::keep_fix(segment, fix)?;
+    save_transcript(&wav_path, &transcript)?;
+    Ok(transcript)
 }
 
 #[tauri::command]
@@ -318,7 +532,13 @@ fn list_lectures(app: tauri::AppHandle) -> Result<Vec<LectureSummary>, String> {
 
 #[tauri::command]
 fn open_lecture(app: tauri::AppHandle, path: String) -> Result<Transcript, String> {
-    lectures::load_transcript(&lecture_file(&app, &path)?)
+    let wav_path = lecture_file(&app, &path)?;
+    let transcript = lectures::load_transcript(&wav_path)?;
+    // the built in words can grow with updates, so older lectures catch up when they're opened
+    match lectures::fix_lecture(&wav_path, transcript.clone(), &words_for(&wav_path)) {
+        Ok((fixed, _)) => Ok(fixed),
+        Err(_) => Ok(transcript),
+    }
 }
 
 #[tauri::command]
@@ -328,8 +548,8 @@ fn search_lectures(app: tauri::AppHandle, query: String) -> Result<Vec<SearchHit
 
 // saves a Markdown copy next to the recording and shows it in Finder
 #[tauri::command]
-fn export_lecture(app: tauri::AppHandle, path: String, title: String) -> Result<String, String> {
-    let markdown_path = lectures::export_markdown(&lecture_file(&app, &path)?, &title)?;
+fn export_lecture(app: tauri::AppHandle, path: String, title: String, math: bool) -> Result<String, String> {
+    let markdown_path = lectures::export_markdown(&lecture_file(&app, &path)?, &title, math)?;
     tauri_plugin_opener::reveal_item_in_dir(&markdown_path).map_err(|e| e.to_string())?;
     Ok(markdown_path.display().to_string())
 }
@@ -394,13 +614,26 @@ pub fn run() {
             transcribe,
             retranscribe,
             delete_lecture,
+            change_back_fix,
+            fix_word,
+            keep_all_fixes,
+            hide_lines,
+            math_view,
+            cross_check,
+            sure_now,
+            change_one_word,
+            keep_fix,
             rename_lecture,
             move_lecture,
             save_order,
-            list_folders,
-            create_folder,
-            rename_folder,
-            delete_folder,
+            course_settings,
+            save_course,
+            list_places,
+            create_place,
+            make_course,
+            make_folder,
+            rename_place,
+            delete_place,
             list_lectures,
             open_lecture,
             search_lectures,

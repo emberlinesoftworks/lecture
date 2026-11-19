@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::marks::MarkedRange;
 use crate::transcriber::Segment;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Transcript {
     // a name you gave it in the sidebar. none means it shows the date it was recorded
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -21,7 +21,7 @@ pub struct Transcript {
 pub struct LectureSummary {
     pub path: String,
     pub title: Option<String>,
-    // the folder it's in, none if it's loose in the Lecture folder
+    // the course or folder it's in ("Math 172/Homework"), none if it's loose
     pub folder: Option<String>,
     pub recorded_at: u64,
     pub duration_ms: i64,
@@ -67,12 +67,54 @@ fn saved_with(wav_path: &Path) -> Vec<PathBuf> {
         wav_path.with_extension("json"),
         wav_path.with_extension("marks.json"),
         wav_path.with_extension("before.json"),
+        wav_path.with_extension("original.json"),
         wav_path.with_extension("md"),
         wav_path.to_path_buf(),
     ]
     .into_iter()
     .filter(|file| file.exists())
     .collect()
+}
+
+// runs a course's word fixes over every lecture already in its folder, returns how many changed.
+// the first time a transcript gets changed this way its untouched version is kept as
+// .original.json, so nothing whisper heard is ever lost
+pub fn fix_words_in_folder(folder: &Path, course: &crate::courses::Course) -> Result<usize, String> {
+    let mut changed = 0;
+    let mut wavs = recordings_in(folder);
+    for inner in subfolders(folder) {
+        wavs.extend(recordings_in(&folder.join(inner)));
+    }
+    for wav_path in wavs {
+        let Ok(transcript) = load_transcript(&wav_path) else { continue };
+        if fix_lecture(&wav_path, transcript, course)?.1 {
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
+// fixes one lecture's words and saves it if anything changed.
+// the first time, the untouched transcript is kept next to it as .original.json
+pub fn fix_lecture(
+    wav_path: &Path,
+    mut transcript: Transcript,
+    course: &crate::courses::Course,
+) -> Result<(Transcript, bool), String> {
+    let before: Vec<String> = transcript.lines.iter().map(|line| line.text.clone()).collect();
+    crate::courses::fix_words(course, &mut transcript.lines);
+    if transcript.lines.iter().map(|line| &line.text).eq(before.iter()) {
+        return Ok((transcript, false));
+    }
+
+    let json_path = wav_path.with_extension("json");
+    let original = wav_path.with_extension("original.json");
+    if !original.exists() {
+        fs::copy(&json_path, &original).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&transcript).map_err(|e| e.to_string())?;
+    fs::write(&json_path, json).map_err(|e| e.to_string())?;
+    Ok((transcript, true))
 }
 
 // --- organizing: names and folders ---
@@ -105,42 +147,108 @@ pub fn move_lecture(wav_path: &Path, to_folder: &Path) -> Result<PathBuf, String
     Ok(new_path)
 }
 
-// the folders inside the Lecture folder, alphabetical
-pub fn list_folders(root: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(root) else { return Vec::new() };
-    let mut folders: Vec<String> = entries
+// --- courses and folders ---
+// both are real folders inside Documents/Lecture, so Finder shows the same thing the app does.
+// a course is a folder with a .course.json in it (its subject and words). courses only sit at
+// the top, and any top level course or folder can have folders inside it, one level deep
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Place {
+    // "Math 172" or "Math 172/Homework"
+    pub path: String,
+    pub name: String,
+    pub course: bool,
+}
+
+pub fn is_course(folder: &Path) -> bool {
+    folder.join(".course.json").exists()
+}
+
+// the course a lecture belongs to, if any (it can be in the course or a folder inside it)
+pub fn course_for(wav_path: &Path) -> Option<PathBuf> {
+    let folder = wav_path.parent()?;
+    [Some(folder), folder.parent()].into_iter().flatten().find(|dir| is_course(dir)).map(Path::to_path_buf)
+}
+
+fn subfolders(folder: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
+    let mut names: Vec<String> = entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().is_dir())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| !name.starts_with('.'))
         .collect();
-    folders.sort_by_key(|name| name.to_lowercase());
-    folders
+    names.sort_by_key(|name| name.to_lowercase());
+    names
+}
+
+// every course and folder, each top level one followed by the folders inside it
+pub fn list_places(root: &Path) -> Vec<Place> {
+    let mut places = Vec::new();
+    for name in subfolders(root) {
+        let folder = root.join(&name);
+        places.push(Place { path: name.clone(), name: name.clone(), course: is_course(&folder) });
+        for inner in subfolders(&folder) {
+            places.push(Place { path: format!("{name}/{inner}"), name: inner, course: false });
+        }
+    }
+    places
 }
 
 // folder names become real folders in Finder, so keep them to things Finder is happy with
 pub fn check_folder_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Give the folder a name".into());
+        return Err("Give it a name".into());
     }
     if name.chars().count() > 60 {
         return Err("That name is a bit long, keep it under 60 characters".into());
     }
     if name.starts_with('.') || name.contains(['/', '\\', ':']) {
-        return Err("Folder names can't start with a dot or have / or : in them".into());
+        return Err("Names can't start with a dot or have / or : in them".into());
     }
     Ok(name.to_string())
 }
 
-pub fn create_folder(root: &Path, name: &str) -> Result<String, String> {
-    let name = check_folder_name(name)?;
-    let path = root.join(&name);
-    if path.exists() {
-        return Err(format!("There's already a folder called {name}"));
+// a course or folder path like "Math 172/Homework", at most two deep
+pub fn check_place(path: &str) -> Result<String, String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() > 2 {
+        return Err("Folders only go one level deep".into());
     }
-    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-    Ok(name)
+    let checked: Result<Vec<String>, String> = parts.into_iter().map(check_folder_name).collect();
+    Ok(checked?.join("/"))
+}
+
+// parent: none makes it at the top. returns its path
+pub fn create_place(root: &Path, parent: Option<&str>, name: &str, course: bool) -> Result<String, String> {
+    let name = check_folder_name(name)?;
+    let path = match parent {
+        Some(parent) => {
+            let parent = check_place(parent)?;
+            if course {
+                return Err("A course can't go inside another course or folder".into());
+            }
+            if parent.contains('/') {
+                return Err("Folders only go one level deep".into());
+            }
+            if !root.join(&parent).is_dir() {
+                return Err(format!("{parent} isn't there anymore"));
+            }
+            format!("{parent}/{name}")
+        }
+        None => name.clone(),
+    };
+
+    let folder = root.join(&path);
+    if folder.exists() {
+        return Err(format!("There's already one called {name}"));
+    }
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    if course {
+        crate::courses::save_course(&folder, &crate::courses::Course::default())?;
+    }
+    Ok(path)
 }
 
 // --- the order you dragged lectures into ---
@@ -170,34 +278,58 @@ pub fn save_order(root: &Path, folder: Option<&str>, files: Vec<String>) -> Resu
     write_order(root, &order)
 }
 
-pub fn rename_folder(root: &Path, old_name: &str, new_name: &str) -> Result<String, String> {
-    let old_name = check_folder_name(old_name)?;
+// renames a course or folder, returns its new path. its lectures keep their order
+pub fn rename_place(root: &Path, path: &str, new_name: &str) -> Result<String, String> {
+    let path = check_place(path)?;
     let new_name = check_folder_name(new_name)?;
-    if old_name == new_name {
-        return Ok(new_name);
+    let new_path = match path.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/{new_name}"),
+        None => new_name.clone(),
+    };
+    if new_path == path {
+        return Ok(new_path);
     }
-    if root.join(&new_name).exists() {
-        return Err(format!("There's already a folder called {new_name}"));
+    if root.join(&new_path).exists() {
+        return Err(format!("There's already one called {new_name}"));
     }
-    fs::rename(root.join(&old_name), root.join(&new_name)).map_err(|e| e.to_string())?;
+    fs::rename(root.join(&path), root.join(&new_path)).map_err(|e| e.to_string())?;
 
-    // the folder's lectures keep their order
     let mut order = load_order(root);
-    if let Some(files) = order.remove(&old_name) {
-        order.insert(new_name.clone(), files);
-        write_order(root, &order)?;
+    let moved: Vec<String> = order.keys().filter(|key| **key == path || key.starts_with(&format!("{path}/"))).cloned().collect();
+    for key in moved {
+        if let Some(files) = order.remove(&key) {
+            order.insert(format!("{new_path}{}", &key[path.len()..]), files);
+        }
     }
-    Ok(new_name)
+    write_order(root, &order)?;
+    Ok(new_path)
 }
 
-// the lectures inside go back to the main list first, nothing gets deleted
-pub fn delete_folder(root: &Path, name: &str) -> Result<(), String> {
-    let name = check_folder_name(name)?;
-    let folder = root.join(&name);
-    for wav_path in recordings_in(&folder) {
-        move_lecture(&wav_path, root)?;
+// removes a course or folder. its lectures (and the ones in folders inside it) go up a level
+// first, so nothing gets deleted
+pub fn delete_place(root: &Path, path: &str) -> Result<(), String> {
+    let path = check_place(path)?;
+    let folder = root.join(&path);
+    let up = folder.parent().ok_or("That isn't a folder")?.to_path_buf();
+
+    let mut inner: Vec<PathBuf> = subfolders(&folder).into_iter().map(|name| folder.join(name)).collect();
+    inner.push(folder.clone());
+    for dir in &inner {
+        for wav_path in recordings_in(dir) {
+            move_lecture(&wav_path, &up)?;
+        }
     }
-    fs::remove_dir(&folder).map_err(|_| format!("{name} has other files in it, so it was left alone in Finder"))
+
+    let _ = fs::remove_file(folder.join(".course.json"));
+    let _ = fs::remove_file(folder.join(".DS_Store"));
+    for dir in &inner {
+        let _ = fs::remove_file(dir.join(".DS_Store"));
+        fs::remove_dir(dir).map_err(|_| format!("{} has other files in it, so it was left alone in Finder", file_name(dir)))?;
+    }
+
+    let mut order = load_order(root);
+    order.retain(|key, _| *key != path && !key.starts_with(&format!("{path}/")));
+    write_order(root, &order)
 }
 
 #[cfg(target_os = "macos")]
@@ -234,15 +366,14 @@ pub fn list_lectures(folder: &Path) -> Vec<LectureSummary> {
         .into_iter()
         .filter_map(|wav_path| {
             let transcript = load_transcript(&wav_path).ok()?;
-            let in_folder = wav_path.parent().filter(|parent| *parent != folder);
             Some(LectureSummary {
                 path: wav_path.display().to_string(),
                 title: transcript.title.clone(),
-                folder: in_folder.and_then(|parent| parent.file_name()).map(|name| name.to_string_lossy().into_owned()),
+                folder: place_of(folder, &wav_path),
                 recorded_at: recorded_at(&wav_path),
                 duration_ms: audio_length_ms(&wav_path)
                     .unwrap_or_else(|| transcript.lines.last().map(|line| line.end_ms).unwrap_or(0)),
-                preview: transcript.lines.first().map(|line| line.text.clone()).unwrap_or_default(),
+                preview: transcript.lines.iter().find(|line| !line.hidden).map(|line| line.text.clone()).unwrap_or_default(),
                 mark_count: transcript.marks.len(),
             })
         })
@@ -274,7 +405,7 @@ pub fn search(folder: &Path, query: &str) -> Vec<SearchHit> {
         let Ok(transcript) = load_transcript(Path::new(&lecture.path)) else { continue };
 
         for (line_index, line) in transcript.lines.iter().enumerate() {
-            if line.text.to_lowercase().contains(&query) {
+            if !line.hidden && line.text.to_lowercase().contains(&query) {
                 hits.push(SearchHit {
                     path: lecture.path.clone(),
                     recorded_at: lecture.recorded_at,
@@ -293,14 +424,40 @@ pub fn search(folder: &Path, query: &str) -> Vec<SearchHit> {
 }
 
 // writes lecture-123.md next to the recording and returns its path
-pub fn export_markdown(wav_path: &Path, title: &str) -> Result<PathBuf, String> {
-    let transcript = load_transcript(wav_path)?;
+// a lecture in a course whose subject is math
+pub fn is_math(wav_path: &Path) -> bool {
+    course_for(wav_path).is_some_and(|folder| crate::courses::load_course(&folder).subject.as_deref() == Some("math"))
+}
+
+// hides or brings back lines first to last
+pub fn set_hidden(wav_path: &Path, first: usize, last: usize, hidden: bool) -> Result<Transcript, String> {
+    let mut transcript = load_transcript(wav_path)?;
+    if first > last || last >= transcript.lines.len() {
+        return Err("Those lines aren't there anymore".into());
+    }
+    for line in &mut transcript.lines[first..=last] {
+        line.hidden = hidden;
+    }
+    let json = serde_json::to_string_pretty(&transcript).map_err(|e| e.to_string())?;
+    fs::write(wav_path.with_extension("json"), json).map_err(|e| e.to_string())?;
+    Ok(transcript)
+}
+
+// export_markdown with math on writes spoken math the way it's written ("6 × sin²(0)")
+pub fn export_markdown(wav_path: &Path, title: &str, math: bool) -> Result<PathBuf, String> {
+    let mut transcript = load_transcript(wav_path)?;
+    if math {
+        for line in &mut transcript.lines {
+            line.text = crate::mathtext::to_math(&line.text);
+        }
+    }
     let mut markdown = format!("# {title}\n\n");
 
     if !transcript.marks.is_empty() {
         markdown.push_str("## Your marks\n\n");
         for mark in &transcript.marks {
-            if let Some(line) = transcript.lines.get(mark.first_line) {
+            let first_shown = (mark.first_line..=mark.last_line).find_map(|index| transcript.lines.get(index).filter(|line| !line.hidden));
+            if let Some(line) = first_shown {
                 markdown.push_str(&format!("- **[{}]** {}\n", format_time(line.start_ms), line.text));
             }
         }
@@ -309,6 +466,9 @@ pub fn export_markdown(wav_path: &Path, title: &str) -> Result<PathBuf, String> 
 
     markdown.push_str("## Transcript\n\n");
     for (index, line) in transcript.lines.iter().enumerate() {
+        if line.hidden {
+            continue;
+        }
         // marked stretches are bold so they stand out when skimming
         let marked = transcript
             .marks
@@ -323,16 +483,24 @@ pub fn export_markdown(wav_path: &Path, title: &str) -> Result<PathBuf, String> 
     Ok(markdown_path)
 }
 
-// lectures sit in the Lecture folder itself or one folder down (Math 172/lecture-123.wav)
-fn lecture_files(folder: &Path) -> Vec<PathBuf> {
-    let mut files = recordings_in(folder);
-    for name in list_folders(folder) {
-        files.extend(recordings_in(&folder.join(name)));
+// lectures sit in the Lecture folder, in a course or folder, or in a folder inside one
+// (Math 172/Homework/lecture-123.wav)
+fn lecture_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = recordings_in(root);
+    for place in list_places(root) {
+        files.extend(recordings_in(&root.join(&place.path)));
     }
     files
 }
 
-fn recordings_in(folder: &Path) -> Vec<PathBuf> {
+// "Math 172/Homework" for a lecture in there, none if it's loose
+fn place_of(root: &Path, wav_path: &Path) -> Option<String> {
+    let relative = wav_path.parent()?.strip_prefix(root).ok()?;
+    let parts: Vec<String> = relative.iter().map(|part| part.to_string_lossy().into_owned()).collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+pub fn recordings_in(folder: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
     entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -385,21 +553,21 @@ mod tests {
     fn lectures_in_folders_show_up_with_their_folder() {
         let root = empty_folder("in-folders");
         save_lecture(&root, 100);
-        create_folder(&root, "Math 172").unwrap();
+        create_place(&root, None, "Math 172", false).unwrap();
         save_lecture(&root.join("Math 172"), 200);
 
         let lectures = list_lectures(&root);
         assert_eq!(lectures.len(), 2);
         assert_eq!(lectures[0].folder.as_deref(), Some("Math 172"));
         assert_eq!(lectures[1].folder, None);
-        assert_eq!(list_folders(&root), ["Math 172"]);
+        assert_eq!(list_places(&root), [Place { path: "Math 172".into(), name: "Math 172".into(), course: false }]);
     }
 
     #[test]
     fn moving_a_lecture_takes_its_transcript_and_marks_along() {
         let root = empty_folder("move");
         let wav = save_lecture(&root, 100);
-        create_folder(&root, "Biology").unwrap();
+        create_place(&root, None, "Biology", false).unwrap();
 
         let moved = move_lecture(&wav, &root.join("Biology")).unwrap();
         assert!(moved.exists());
@@ -445,23 +613,96 @@ mod tests {
     #[test]
     fn renaming_a_folder_keeps_its_order() {
         let root = empty_folder("order-rename");
-        create_folder(&root, "Bio").unwrap();
+        create_place(&root, None, "Bio", false).unwrap();
         save_lecture(&root.join("Bio"), 100);
         save_lecture(&root.join("Bio"), 200);
         save_order(&root, Some("Bio"), vec!["lecture-100.wav".into(), "lecture-200.wav".into()]).unwrap();
 
-        rename_folder(&root, "Bio", "Biology").unwrap();
+        rename_place(&root, "Bio", "Biology").unwrap();
         let order: Vec<u64> = list_lectures(&root).iter().map(|l| l.recorded_at).collect();
         assert_eq!(order, [100, 200]);
     }
 
     #[test]
+    fn course_words_fix_old_lectures_and_keep_the_original() {
+        use crate::courses::{Course, CourseWord};
+        let root = empty_folder("course-fix");
+        create_place(&root, None, "Math", false).unwrap();
+        let folder = root.join("Math");
+        let wav = folder.join("lecture-100.wav");
+        fs::write(&wav, b"").unwrap();
+        let transcript = Transcript { title: None, lines: vec![line(0, "The Gordon series.")], marks: Vec::new() };
+        fs::write(wav.with_extension("json"), serde_json::to_string(&transcript).unwrap()).unwrap();
+
+        let course = Course { subject: None, words: vec![CourseWord { word: "Maclaurin".into(), heard_as: vec!["Gordon".into()] }] };
+        assert_eq!(fix_words_in_folder(&folder, &course).unwrap(), 1);
+        assert_eq!(load_transcript(&wav).unwrap().lines[0].text, "The Maclaurin series.");
+        assert!(fs::read_to_string(wav.with_extension("original.json")).unwrap().contains("Gordon"));
+
+        // nothing left to fix the second time
+        assert_eq!(fix_words_in_folder(&folder, &course).unwrap(), 0);
+    }
+
+    #[test]
+    fn courses_hold_folders_but_not_other_courses() {
+        let root = empty_folder("places");
+        assert_eq!(create_place(&root, None, "Math 172", true).unwrap(), "Math 172");
+        assert_eq!(create_place(&root, Some("Math 172"), "Homework", false).unwrap(), "Math 172/Homework");
+        create_place(&root, None, "Old notes", false).unwrap();
+
+        assert!(create_place(&root, Some("Math 172"), "Calc", true).is_err());
+        assert!(create_place(&root, Some("Math 172/Homework"), "Deeper", false).is_err());
+
+        let places = list_places(&root);
+        let summary: Vec<(&str, bool)> = places.iter().map(|p| (p.path.as_str(), p.course)).collect();
+        assert_eq!(summary, [("Math 172", true), ("Math 172/Homework", false), ("Old notes", false)]);
+    }
+
+    #[test]
+    fn lectures_in_a_folder_inside_a_course_belong_to_the_course() {
+        let root = empty_folder("course-inner");
+        create_place(&root, None, "Math 172", true).unwrap();
+        create_place(&root, Some("Math 172"), "Homework", false).unwrap();
+        let wav = save_lecture(&root.join("Math 172/Homework"), 100);
+
+        assert_eq!(course_for(&wav), Some(root.join("Math 172")));
+        assert_eq!(list_lectures(&root)[0].folder.as_deref(), Some("Math 172/Homework"));
+        assert_eq!(course_for(&save_lecture(&root, 200)), None);
+    }
+
+    #[test]
+    fn deleting_a_course_moves_everything_up_and_keeps_it() {
+        let root = empty_folder("delete-course");
+        create_place(&root, None, "Bio", true).unwrap();
+        create_place(&root, Some("Bio"), "Labs", false).unwrap();
+        save_lecture(&root.join("Bio"), 100);
+        save_lecture(&root.join("Bio/Labs"), 200);
+
+        delete_place(&root, "Bio").unwrap();
+        assert!(!root.join("Bio").exists());
+        assert!(root.join("lecture-100.wav").exists());
+        assert!(root.join("lecture-200.wav").exists());
+    }
+
+    #[test]
+    fn renaming_a_course_keeps_the_order_of_its_folders() {
+        let root = empty_folder("rename-course");
+        create_place(&root, None, "Bio", true).unwrap();
+        create_place(&root, Some("Bio"), "Labs", false).unwrap();
+        save_order(&root, Some("Bio/Labs"), vec!["lecture-1.wav".into()]).unwrap();
+
+        assert_eq!(rename_place(&root, "Bio", "Biology").unwrap(), "Biology");
+        assert!(is_course(&root.join("Biology")));
+        assert_eq!(load_order(&root).get("Biology/Labs"), Some(&vec!["lecture-1.wav".to_string()]));
+    }
+
+    #[test]
     fn deleting_a_folder_keeps_its_lectures() {
         let root = empty_folder("delete-folder");
-        create_folder(&root, "Physics").unwrap();
+        create_place(&root, None, "Physics", false).unwrap();
         save_lecture(&root.join("Physics"), 100);
 
-        delete_folder(&root, "Physics").unwrap();
+        delete_place(&root, "Physics").unwrap();
         assert!(!root.join("Physics").exists());
         assert!(root.join("lecture-100.wav").exists());
         assert!(root.join("lecture-100.json").exists());
@@ -497,7 +738,7 @@ mod tests {
     }
 
     fn line(start_ms: i64, text: &str) -> Segment {
-        Segment { start_ms, end_ms: start_ms + 2000, text: text.to_string(), pause_before_ms: 0 }
+        Segment { start_ms, end_ms: start_ms + 2000, text: text.to_string(), ..Default::default() }
     }
 
     // a throwaway folder with one lecture in it
@@ -528,6 +769,31 @@ mod tests {
     }
 
     #[test]
+    fn hidden_lines_stay_out_of_search_exports_and_the_preview() {
+        let folder = empty_folder("hidden");
+        let wav = folder.join("lecture-1700000000.wav");
+        fs::write(&wav, b"").unwrap();
+        let transcript = Transcript {
+            title: None,
+            lines: vec![line(0, "Did you see the game last night?"), line(2000, "Okay, the Maclaurin series.")],
+            marks: Vec::new(),
+        };
+        fs::write(wav.with_extension("json"), serde_json::to_string(&transcript).unwrap()).unwrap();
+
+        set_hidden(&wav, 0, 0, true).unwrap();
+        assert!(search(&folder, "game").is_empty());
+        assert_eq!(list_lectures(&folder)[0].preview, "Okay, the Maclaurin series.");
+        let markdown = fs::read_to_string(export_markdown(&wav, "Test", false).unwrap()).unwrap();
+        assert!(!markdown.contains("game") && markdown.contains("Maclaurin"));
+
+        // and it comes back
+        set_hidden(&wav, 0, 0, false).unwrap();
+        assert_eq!(search(&folder, "game").len(), 1);
+        assert!(set_hidden(&wav, 0, 5, true).is_err());
+        fs::remove_dir_all(folder).ok();
+    }
+
+    #[test]
     fn search_ignores_case() {
         let folder = folder_with_lecture("search");
         let hits = search(&folder, "coulomb");
@@ -553,7 +819,7 @@ mod tests {
     fn export_bolds_marked_lines() {
         let folder = folder_with_lecture("export");
         let wav = folder.join("lecture-1700000000.wav");
-        let markdown = fs::read_to_string(export_markdown(&wav, "Physics").unwrap()).unwrap();
+        let markdown = fs::read_to_string(export_markdown(&wav, "Physics", false).unwrap()).unwrap();
         assert!(markdown.starts_with("# Physics"));
         assert!(markdown.contains("## Your marks\n\n- **[00:03]** Here it is."));
         assert!(markdown.contains("[00:00] Today we talk about Coulomb's law."));

@@ -210,7 +210,7 @@ mod tests {
     }
 
     fn line(start_ms: i64, text: &str) -> Segment {
-        Segment { start_ms, end_ms: start_ms + 2000, text: text.to_string(), pause_before_ms: 0 }
+        Segment { start_ms, end_ms: start_ms + 2000, text: text.to_string(), ..Default::default() }
     }
 
     #[test]

@@ -15,6 +15,17 @@ pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
 // it sits next to the speech model, and if it's missing we just transcribe everything
 pub const VOICE_MODEL_FILE: &str = "ggml-silero-v5.1.2.bin";
 
+// a word whisper gave less than this chance of being right gets a gray underline.
+// (each word piece has its own chance, and a word goes by its weakest piece)
+// (tuned on a real class: at 0.5 almost every flagged word was right)
+const UNSURE_BELOW: f32 = 0.4;
+
+// little words that get low scores all the time and are almost never the mistake
+const NEVER_UNSURE: [&str; 24] = [
+    "the", "and", "but", "for", "you", "are", "was", "were", "that", "this", "with", "which", "when", "what",
+    "then", "there", "they", "have", "has", "got", "its", "let's", "we're", "i'm",
+];
+
 // a silence this long between words starts a new line
 const PAUSE_BREAK_MS: i64 = 500;
 // a silence this long starts a new line no matter what
@@ -22,7 +33,7 @@ const LONG_PAUSE_MS: i64 = 1500;
 // lines longer than this get broken at the next word
 const MAX_LINE_MS: i64 = 12_000;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Segment {
     pub start_ms: i64,
     pub end_ms: i64,
@@ -31,6 +42,40 @@ pub struct Segment {
     // (older transcripts don't have this, so it defaults to 0)
     #[serde(default)]
     pub pause_before_ms: i64,
+    // words a course fix changed in this line, so the window can underline them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<WordFix>,
+    // words you changed back in this line, so they don't get fixed again
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
+    // you hid this line (a side conversation, someone's name). it stays in the file so it
+    // can come back, but it's left out of the window, search, exports and playback
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    // words whisper wasn't sure it heard right, so the window can point them out
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsure: Vec<Unsure>,
+    // the unsure words while the line is still being put together, before they have a spot
+    #[serde(skip)]
+    pub(crate) unsure_words: Vec<String>,
+}
+
+// a word whisper wasn't sure about. start and end count characters in the line,
+// options is what the other model heard there (empty if it heard the same or wasn't asked)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Unsure {
+    pub start: usize,
+    pub end: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+// one fixed word. start and end count characters in the fixed text, heard is what whisper wrote
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WordFix {
+    pub start: usize,
+    pub end: usize,
+    pub heard: String,
 }
 
 // tells the window how far into the recording whisper has gotten, in ms
@@ -124,10 +169,6 @@ fn transcribe_audio(
     // same settings we tested with whisper-cli: english, beam search of 5
     let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: -1.0 });
     params.set_language(Some("en"));
-    // don't feed whisper its own last 30 seconds as context. once it writes a stretch
-    // without punctuation it keeps going that way (real class, Nov 16: whole minutes
-    // with no periods), and starting each window fresh breaks that
-    params.set_no_context(true);
     params.set_token_timestamps(true);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -150,6 +191,9 @@ fn transcribe_audio(
     // collect every word piece with its timing
     let mut tokens = Vec::new();
     for segment in state.as_iter() {
+        // the first word whisper writes in each piece gets a low score even when it's right
+        // ("Let's", "Which", "Plus" on a real class), so it's never counted as unsure
+        let mut first_word = true;
         for i in 0..segment.n_tokens() {
             let Some(token) = segment.get_token(i) else { continue };
             let text = token.to_str_lossy().map_err(|e| e.to_string())?.to_string();
@@ -165,7 +209,9 @@ fn transcribe_audio(
                 text,
                 start_ms: to_recording_time(timing.t0 * 10),
                 end_ms: to_recording_time(timing.t1 * 10),
+                probability: if first_word { 1.0 } else { token.token_probability() },
             });
+            first_word = false;
         }
     }
 
@@ -196,7 +242,32 @@ fn transcribe_audio(
     // a line that was only a ">>" is empty now
     lines.retain(|line| !line.text.is_empty());
 
-    Ok(join_tiny_lines(lines))
+    let mut lines = join_tiny_lines(lines);
+    for line in &mut lines {
+        place_unsure(line);
+    }
+    Ok(lines)
+}
+
+// finds where each unsure word ended up in the finished line
+// (cleaning up can drop or move words, so it's looked up by the word itself)
+pub(crate) fn place_unsure(line: &mut Segment) {
+    let chars: Vec<char> = line.text.chars().collect();
+    let mut from = 0;
+    for word in std::mem::take(&mut line.unsure_words) {
+        let word: Vec<char> = word.chars().collect();
+        let found = (from..chars.len().saturating_sub(word.len().saturating_sub(1))).find(|&i| {
+            let end = i + word.len();
+            end <= chars.len()
+                && chars[i..end].iter().zip(&word).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+                && (i == 0 || !chars[i - 1].is_alphanumeric())
+                && (end == chars.len() || !chars[end].is_alphanumeric())
+        });
+        if let Some(start) = found {
+            line.unsure.push(Unsure { start, end: start + word.len(), options: Vec::new() });
+            from = start + word.len();
+        }
+    }
 }
 
 const FRAME_MS: usize = 20;
@@ -254,6 +325,8 @@ struct Token {
     text: String,
     start_ms: i64,
     end_ms: i64,
+    // whisper's chance that it got this piece right, 0 to 1
+    probability: f32,
 }
 
 // whisper's own chunks can cut a sentence in half ("every cell" / "of your body"),
@@ -268,8 +341,15 @@ fn build_lines(tokens: &[Token]) -> Vec<Segment> {
     let mut end_ms = 0;
     let mut sentence_ended = true;
     let mut starts_sentence = true;
+    // the word being put together from pieces, and its weakest piece
+    let mut word = String::new();
+    let mut word_chance = 1.0_f32;
+    let mut unsure_words = Vec::new();
 
     for token in tokens {
+        if token.text.starts_with(' ') {
+            finish_word(&mut word, &mut word_chance, &mut unsure_words);
+        }
         // only break before a new word (tokens can be pieces of words),
         // which also keeps numbers like 3.5 from splitting at the dot
         if token.text.starts_with(' ') {
@@ -283,7 +363,9 @@ fn build_lines(tokens: &[Token]) -> Vec<Segment> {
                 let pause_break = (pause >= PAUSE_BREAK_MS && words_so_far >= 4) || pause >= LONG_PAUSE_MS;
 
                 if sentence_ended || pause_break || too_long {
-                    lines.push(make_line(&text, start_ms.take().unwrap(), end_ms, starts_sentence || !has_punctuation));
+                    let mut line = make_line(&text, start_ms.take().unwrap(), end_ms, starts_sentence || !has_punctuation);
+                    line.unsure_words = std::mem::take(&mut unsure_words);
+                    lines.push(line);
                     text.clear();
                     starts_sentence = sentence_ended;
                 }
@@ -293,15 +375,32 @@ fn build_lines(tokens: &[Token]) -> Vec<Segment> {
         start_ms.get_or_insert(token.start_ms);
         end_ms = token.end_ms;
         text.push_str(&token.text);
+        word.push_str(&token.text);
+        word_chance = word_chance.min(token.probability);
         // look at the whole line so far, since "Dr" and "." can come as two tokens
         sentence_ended = ends_sentence(&text);
     }
 
+    finish_word(&mut word, &mut word_chance, &mut unsure_words);
     if let Some(start_ms) = start_ms {
-        lines.push(make_line(&text, start_ms, end_ms, starts_sentence || !has_punctuation));
+        let mut line = make_line(&text, start_ms, end_ms, starts_sentence || !has_punctuation);
+        line.unsure_words = unsure_words;
+        lines.push(line);
     }
     lines.retain(|line| !line.text.is_empty());
     lines
+}
+
+// a word is done: if whisper wasn't sure about it, remember it (without its punctuation).
+// short words like "a" and "of" are left out, they're rarely the problem and would be everywhere
+fn finish_word(word: &mut String, chance: &mut f32, unsure_words: &mut Vec<String>) {
+    let bare = word.trim().trim_matches(|c: char| !c.is_alphanumeric());
+    let common = NEVER_UNSURE.contains(&bare.to_lowercase().replace('’', "'").as_str());
+    if *chance < UNSURE_BELOW && !common && bare.chars().filter(|c| c.is_alphabetic()).count() >= 3 {
+        unsure_words.push(bare.to_string());
+    }
+    word.clear();
+    *chance = 1.0;
 }
 
 fn make_line(text: &str, start_ms: i64, end_ms: i64, capitalize_it: bool) -> Segment {
@@ -312,7 +411,7 @@ fn make_line(text: &str, start_ms: i64, end_ms: i64, capitalize_it: bool) -> Seg
         end_ms,
         // only capitalize real sentence starts, not the second half of a split sentence
         text: if capitalize_it { capitalize(text) } else { text.to_string() },
-        pause_before_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -330,8 +429,10 @@ fn join_tiny_lines(lines: Vec<Segment>) -> Vec<Segment> {
         let tiny = word_count(&line.text) <= TINY_LINE_WORDS;
 
         let had_waiting = waiting.is_some();
-        if let Some(earlier) = waiting.take() {
+        if let Some(mut earlier) = waiting.take() {
             line.text = format!("{} {}", earlier.text, line.text);
+            earlier.unsure_words.append(&mut line.unsure_words);
+            line.unsure_words = earlier.unsure_words;
             line.start_ms = earlier.start_ms;
             line.pause_before_ms = earlier.pause_before_ms;
         }
@@ -342,6 +443,7 @@ fn join_tiny_lines(lines: Vec<Segment>) -> Vec<Segment> {
                 if let Some(previous) = joined.last_mut() {
                     if !ends_sentence(&previous.text) {
                         previous.text = format!("{} {}", previous.text, line.text);
+                        previous.unsure_words.append(&mut line.unsure_words);
                         previous.end_ms = line.end_ms;
                         continue;
                     }
@@ -419,7 +521,7 @@ fn capitalize(line: &str) -> String {
 }
 
 // read the WAV we recorded and turn it into 16k mono floats for whisper
-fn load_audio(wav_path: &Path) -> Result<Vec<f32>, String> {
+pub fn load_audio(wav_path: &Path) -> Result<Vec<f32>, String> {
     let mut reader = hound::WavReader::open(wav_path).map_err(|e| format!("couldn't open recording: {e}"))?;
     let sample_rate = reader.spec().sample_rate;
     let samples: Vec<f32> = reader
@@ -500,16 +602,28 @@ mod tests {
 
     fn words(list: &[(&str, i64, i64)]) -> Vec<Token> {
         list.iter()
-            .map(|&(text, start_ms, end_ms)| Token { text: text.to_string(), start_ms, end_ms })
+            .map(|&(text, start_ms, end_ms)| Token { text: text.to_string(), start_ms, end_ms, probability: 0.9 })
             .collect()
     }
 
     fn line(start_ms: i64, text: &str) -> Segment {
-        Segment { start_ms, end_ms: start_ms + 1000, text: text.to_string(), pause_before_ms: 0 }
+        Segment { start_ms, end_ms: start_ms + 1000, text: text.to_string(), ..Default::default() }
     }
 
     fn texts(lines: &[Segment]) -> Vec<String> {
         lines.iter().map(|line| line.text.clone()).collect()
+    }
+
+    #[test]
+    fn unsure_words_get_found_in_the_finished_line() {
+        let mut tokens = words(&[(" So", 0, 200), (" the", 200, 400), (" Mc", 400, 500), ("loran", 500, 700), (" series,", 700, 900), (" a", 900, 1000), (" b", 1000, 1100), (" of", 1100, 1200), (" course.", 1200, 1400)]);
+        tokens[3].probability = 0.2; // "loran"
+        tokens[6].probability = 0.1; // "b", too short to bother with
+        tokens[1].probability = 0.1; // "the", never the problem
+        let mut lines = build_lines(&tokens);
+        place_unsure(&mut lines[0]);
+        assert_eq!(lines[0].text, "So the Mcloran series, a b of course.");
+        assert_eq!(lines[0].unsure, [Unsure { start: 7, end: 14, options: Vec::new() }]);
     }
 
     #[test]

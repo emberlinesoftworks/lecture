@@ -1,12 +1,21 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+// a word a course fix changed. start and end count characters in the line's text
+type WordFix = { start: number; end: number; heard: string };
+
 type Segment = {
   start_ms: number;
   end_ms: number;
   text: string;
   pause_before_ms: number;
+  fixes?: WordFix[];
+  hidden?: boolean;
+  unsure?: Unsure[];
 };
+
+// a word whisper wasn't sure about, and what the other model heard there
+type Unsure = { start: number; end: number; options?: string[] };
 
 type MarkedRange = {
   first_line: number;
@@ -26,6 +35,9 @@ type StoppedRecording = {
   // already done if it was transcribed during the recording
   transcript: Transcript | null;
 };
+
+// a course or a folder. path is like "Math 172" or "Math 172/Homework"
+type Place = { path: string; name: string; course: boolean };
 
 type LectureSummary = {
   path: string;
@@ -57,8 +69,20 @@ const lectureWhen = document.querySelector<HTMLElement>("#lecture-when")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#export")!;
 const retranscribeButton = document.querySelector<HTMLButtonElement>("#retranscribe")!;
 const editListButton = document.querySelector<HTMLButtonElement>("#edit-list")!;
+const recordIntoLabel = document.querySelector<HTMLElement>("#record-into-label")!;
+const recordInto = document.querySelector<HTMLSelectElement>("#record-into")!;
+const coursePage = document.querySelector<HTMLElement>("#course-page")!;
+const courseName = document.querySelector<HTMLElement>("#course-name")!;
+const courseBack = document.querySelector<HTMLButtonElement>("#course-back")!;
+const courseSubject = document.querySelector<HTMLSelectElement>("#course-subject")!;
+const wordForm = document.querySelector<HTMLFormElement>("#word-form")!;
+const wordInput = document.querySelector<HTMLInputElement>("#word-input")!;
+const heardInput = document.querySelector<HTMLInputElement>("#heard-input")!;
+const wordList = document.querySelector<HTMLUListElement>("#word-list")!;
+const courseStatus = document.querySelector<HTMLElement>("#course-status")!;
 const editBar = document.querySelector<HTMLElement>("#edit-bar")!;
 const newFolderButton = document.querySelector<HTMLButtonElement>("#new-folder")!;
+const newCourseButton = document.querySelector<HTMLButtonElement>("#new-course")!;
 const player = document.querySelector<HTMLAudioElement>("#player")!;
 const transcriptList = document.querySelector<HTMLOListElement>("#transcript")!;
 const playButton = document.querySelector<HTMLButtonElement>("#play")!;
@@ -142,6 +166,7 @@ function setRecording(isRecording: boolean) {
   recordButton.setAttribute("aria-pressed", String(isRecording));
   buttonLabel.textContent = isRecording ? "Stop" : "Record";
   markButton.hidden = !isRecording;
+  recordInto.disabled = isRecording;
 
   if (isRecording) {
     meterInterval = setInterval(updateMeter, 70);
@@ -197,6 +222,18 @@ async function updateMeter() {
   }
   meterBars[meterBars.length - 1].style.transform = `scaleY(${height})`;
 }
+
+// --- recorder size ---
+// while you're reading a lecture the recorder shrinks to one line at the top,
+// so the transcript gets the room. recording makes it big again
+
+function updateRecorderSize() {
+  const reviewing = !playback.hidden && !recordButton.classList.contains("recording");
+  document.body.classList.toggle("reviewing", reviewing);
+}
+
+new MutationObserver(updateRecorderSize).observe(playback, { attributes: true, attributeFilter: ["hidden"] });
+new MutationObserver(updateRecorderSize).observe(recordButton, { attributes: true, attributeFilter: ["class"] });
 
 // --- hiding the sidebar ---
 
@@ -264,41 +301,16 @@ listen<boolean>("transcription-resting", (event) => {
 
 // each line is a button, clicking it jumps the audio to when that was said
 function showTranscript(audioPath: string, transcript: Transcript) {
+  rememberSpot();
   currentPath = audioPath;
-  segments = transcript.lines;
-  lineButtons = [];
-  currentLine = -1;
-  transcriptList.replaceChildren();
-
-  segments.forEach((segment, index) => {
-    const item = document.createElement("li");
-    const line = document.createElement("button");
-    const time = document.createElement("time");
-    const text = document.createElement("span");
-
-    line.type = "button";
-    line.className = "line";
-    time.textContent = formatTime(segment.start_ms);
-    text.textContent = segment.text;
-    line.append(time, text);
-    line.addEventListener("click", () => playFrom(index));
-
-    item.append(line);
-    transcriptList.append(item);
-    lineButtons.push(line);
-  });
-
-  // rust works out which lines each mark covers (see marks.rs)
-  markStarts = [];
-  for (const range of transcript.marks) {
-    const firstLine = segments[range.first_line];
-    if (firstLine) markStarts.push(firstLine.start_ms);
-    for (let index = range.first_line; index <= range.last_line; index++) {
-      lineButtons[index]?.classList.add("in-mark");
-    }
-    lineButtons[range.first_line]?.classList.add("marked");
-    lineButtons[range.first_line]?.setAttribute("title", `You marked this at ${formatTime(range.mark_ms)}`);
-  }
+  resumeSpot = true;
+  mathLines = null;
+  spokenLine = -1;
+  drawLines(transcript);
+  transcriptList.scrollTop = 0;
+  following = true;
+  lastHidden = -1;
+  loadMath(audioPath);
 
   // a recording with nothing in it would otherwise just leave a blank screen
   if (segments.length === 0) {
@@ -315,25 +327,649 @@ function showTranscript(audioPath: string, transcript: Transcript) {
   highlightOpenLecture();
 }
 
+// --- each lecture picks up where you stopped listening ---
+// kept by the recording's file name, so moving or renaming a lecture doesn't lose it
+
+let resumeSpot = false;
+let lastRemembered = 0;
+
+function spotKey(path: string) {
+  return `listened:${path.slice(path.lastIndexOf("/") + 1)}`;
+}
+
+function rememberSpot() {
+  if (!currentPath || !player.duration) return;
+  const seconds = player.currentTime;
+  try {
+    // the very start or the very end isn't worth coming back to
+    if (seconds < 5 || seconds > player.duration - 5) {
+      localStorage.removeItem(spotKey(currentPath));
+    } else {
+      localStorage.setItem(spotKey(currentPath), String(Math.floor(seconds)));
+    }
+  } catch {
+    // nowhere to keep it, it'll just start from the top
+  }
+}
+
+function savedSpot(path: string) {
+  try {
+    return Number(localStorage.getItem(spotKey(path))) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+player.addEventListener("loadedmetadata", () => {
+  if (!resumeSpot) return;
+  resumeSpot = false;
+  const seconds = savedSpot(currentPath);
+  if (seconds > 0 && seconds < player.duration - 5) player.currentTime = seconds;
+});
+player.addEventListener("pause", rememberSpot);
+player.addEventListener("ended", rememberSpot);
+player.addEventListener("timeupdate", () => {
+  if (Date.now() - lastRemembered < 5000) return;
+  lastRemembered = Date.now();
+  rememberSpot();
+});
+window.addEventListener("pagehide", rememberSpot);
+
+// the lines themselves. kept apart from showTranscript so changing one word back
+// doesn't restart the audio
+function drawLines(transcript: Transcript) {
+  // a fix changed the words, so the math needs working out again
+  const wordsChanged = mathLines !== null && shownTranscript !== undefined && transcript !== shownTranscript;
+  shownTranscript = transcript;
+  segments = transcript.lines;
+  lineButtons = [];
+  currentLine = -1;
+  closeFixPopup();
+  transcriptList.replaceChildren();
+
+  segments.forEach((segment, index) => {
+    const item = document.createElement("li");
+    const line = document.createElement("button");
+    const time = document.createElement("time");
+    const text = document.createElement("span");
+
+    line.type = "button";
+    line.className = "line";
+    time.textContent = formatTime(segment.start_ms);
+    const math = index === spokenLine ? undefined : mathLines?.[index];
+    if (math !== undefined) {
+      text.textContent = math;
+    } else {
+      text.append(...lineText(segment, index));
+    }
+    line.classList.toggle("spoken", index === spokenLine);
+    line.append(time, text);
+    line.addEventListener("click", () => playFrom(index));
+    line.addEventListener("dblclick", fixWordAt);
+
+    const hide = document.createElement("button");
+    hide.type = "button";
+    hide.className = "hide-line";
+    hide.textContent = "Hide";
+    hide.title = "Hide this line. Shift-click to hide everything since the last line you hid";
+    hide.addEventListener("click", (event) => hideFrom(index, event.shiftKey));
+
+    // a stretch of hidden lines shows up as one row you can open back up
+    if (segment.hidden && !segments[index - 1]?.hidden) {
+      transcriptList.append(hiddenRow(index));
+    }
+    item.hidden = Boolean(segment.hidden);
+    item.className = "transcript-line";
+    item.append(line, hide);
+    transcriptList.append(item);
+    lineButtons.push(line);
+  });
+
+  // rust works out which lines each mark covers (see marks.rs)
+  markStarts = [];
+  for (const range of transcript.marks) {
+    const firstLine = segments[range.first_line];
+    if (firstLine) markStarts.push(firstLine.start_ms);
+    for (let index = range.first_line; index <= range.last_line; index++) {
+      lineButtons[index]?.classList.add("in-mark");
+    }
+    lineButtons[range.first_line]?.classList.add("marked");
+    lineButtons[range.first_line]?.setAttribute("title", `You marked this at ${formatTime(range.mark_ms)}`);
+  }
+  drawScrubMarks();
+
+  // done fixing that line: it goes back to math once the new math is worked out
+  if (wordsChanged) {
+    spokenLine = -1;
+    loadMath(currentPath);
+  }
+}
+
+// --- math lectures: "6 times the sine squared of 0" shown as 6 × sin²(0) ---
+// in a math course the transcript shows math. the spoken words are still underneath
+// (search and word fixes use them), and double clicking a line shows them to fix a word
+
+let mathLines: string[] | null = null;
+let shownTranscript: Transcript | undefined;
+// the line showing its spoken words right now, -1 for none
+let spokenLine = -1;
+
+function showingMath() {
+  return mathLines !== null;
+}
+
+// rust only sends math lines for lectures in a math course
+async function loadMath(path: string) {
+  try {
+    const lines = await invoke<string[] | null>("math_view", { path });
+    if (currentPath !== path) return;
+    mathLines = lines;
+    if (lines && shownTranscript) redrawKeepingScroll(shownTranscript);
+  } catch {
+    // stays as spoken words
+  }
+}
+
+function redrawKeepingScroll(transcript: Transcript) {
+  const scrolled = transcriptList.scrollTop;
+  drawLines(transcript);
+  transcriptList.scrollTop = scrolled;
+}
+
+function showSpoken(index: number) {
+  spokenLine = index;
+  if (shownTranscript) redrawKeepingScroll(shownTranscript);
+}
+
+// --- hiding lines: side conversations, someone's name ---
+
+let lastHidden = -1;
+
+function hiddenRow(first: number) {
+  let last = first;
+  while (segments[last + 1]?.hidden) last++;
+  const count = last - first + 1;
+
+  const item = document.createElement("li");
+  item.className = "hidden-lines";
+  const row = document.createElement("button");
+  row.type = "button";
+  const label = document.createElement("span");
+  label.textContent = count === 1 ? "1 line hidden" : `${count} lines hidden`;
+  const show = document.createElement("span");
+  show.className = "hidden-show";
+  show.textContent = "Show";
+  row.append(label, show);
+  row.addEventListener("click", () => setHidden(first, last, false));
+  item.append(row);
+  return item;
+}
+
+function hideFrom(index: number, stretch: boolean) {
+  // shift-click hides the whole stretch between this and the last line you hid
+  const from = stretch && lastHidden >= 0 ? Math.min(lastHidden, index) : index;
+  const to = stretch && lastHidden >= 0 ? Math.max(lastHidden, index) : index;
+  lastHidden = index;
+  setHidden(from, to, true);
+}
+
+async function setHidden(first: number, last: number, hidden: boolean) {
+  const scrolled = transcriptList.scrollTop;
+  try {
+    drawLines(await invoke<Transcript>("hide_lines", { path: currentPath, first, last, hidden }));
+    transcriptList.scrollTop = scrolled;
+    refreshLectureList();
+  } catch (error) {
+    statusText.textContent = String(error);
+  }
+}
+
+// playing straight through skips what you hid
+function skipHidden() {
+  const segment = segments[currentLine];
+  if (!segment?.hidden || player.paused) return;
+  const next = segments.findIndex((other, index) => index > currentLine && !other.hidden);
+  if (next >= 0) {
+    player.currentTime = segments[next].start_ms / 1000;
+  } else {
+    player.pause();
+  }
+}
+
+// a line's words, with the ones a course fix changed underlined
+// fixed words get the amber underline, unsure ones a gray dotted one
+function lineText(segment: Segment, lineIndex: number) {
+  const chars = Array.from(segment.text);
+  const parts: (Node | string)[] = [];
+  let at = 0;
+
+  const marked = [
+    ...(segment.fixes ?? []).map((fix, index) => ({ start: fix.start, end: fix.end, fix, index })),
+    ...(SHOW_UNSURE ? (segment.unsure ?? []) : []).map((unsure, index) => ({ start: unsure.start, end: unsure.end, unsure, index })),
+  ].sort((a, b) => a.start - b.start);
+
+  for (const spot of marked) {
+    if (spot.start < at || spot.end > chars.length) continue;
+    parts.push(chars.slice(at, spot.start).join(""));
+    const word = document.createElement("span");
+    word.textContent = chars.slice(spot.start, spot.end).join("");
+    if ("fix" in spot && spot.fix) {
+      const heard = spot.fix.heard;
+      word.className = "fixed-word";
+      word.title = `Lecture heard "${heard}"`;
+      word.addEventListener("click", (event) => {
+        // just this word, not playing the line
+        event.stopPropagation();
+        openFixPopup(word, lineIndex, spot.index, heard);
+      });
+    } else if ("unsure" in spot && spot.unsure) {
+      const unsure = spot.unsure;
+      word.className = "unsure-word";
+      word.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openUnsurePopup(word, lineIndex, spot.index, unsure);
+      });
+    }
+    parts.push(word);
+    at = spot.end;
+  }
+  parts.push(chars.slice(at).join(""));
+  return parts;
+}
+
+// --- unsure words: what the other model heard, one tap to use it ---
+// off for now. tested on a real class (Nov 18) the two speech models make the same mistakes,
+// so their second opinions were mostly wrong. the confidence is still saved with each transcript,
+// so a better second opinion (the on-device language model) can turn this back on
+const SHOW_UNSURE = false;
+
+function openUnsurePopup(word: HTMLElement, line: number, index: number, unsure: Unsure) {
+  closeFixPopup();
+  fixPopupWord = word;
+  fixPopupScroll = transcriptList.scrollTop;
+  word.classList.add("active");
+  const heard = word.textContent ?? "";
+
+  const label = document.createElement("p");
+  label.className = "fix-heard";
+  label.textContent = unsure.options?.length ? "Lecture isn't sure. The other model heard" : "Lecture isn't sure it heard this right";
+
+  const buttons = document.createElement("div");
+  buttons.className = "fix-buttons";
+  for (const option of unsure.options ?? []) {
+    const use = document.createElement("button");
+    use.type = "button";
+    use.className = "text-button option-button";
+    use.textContent = option;
+    use.addEventListener("click", () =>
+      updateLines("change_one_word", { line, near: unsure.start, heard, word: option }),
+    );
+    buttons.append(use);
+  }
+  const right = document.createElement("button");
+  right.type = "button";
+  right.className = "text-button";
+  right.textContent = "It's right";
+  right.addEventListener("click", () => updateLines("sure_now", { line, word: index }));
+  buttons.append(right);
+
+  fixPopup.replaceChildren(label, buttons);
+  fixPopup.hidden = false;
+  placePopup(word.getBoundingClientRect());
+  (buttons.firstElementChild as HTMLButtonElement).focus();
+}
+
+async function updateLines(command: string, args: Record<string, unknown>) {
+  const scrolled = transcriptList.scrollTop;
+  try {
+    drawLines(await invoke<Transcript>(command, { path: currentPath, ...args }));
+    transcriptList.scrollTop = scrolled;
+  } catch (error) {
+    statusText.textContent = String(error);
+    closeFixPopup();
+  }
+}
+
+// after a transcript is ready, the other model gives a second opinion on the unsure words.
+// it fills in a moment later, the transcript is already usable
+async function crossCheck(path: string) {
+  progressText.textContent = "Double-checking unsure words";
+  try {
+    const transcript = await invoke<Transcript>("cross_check", { path });
+    if (currentPath === path) {
+      const scrolled = transcriptList.scrollTop;
+      drawLines(transcript);
+      transcriptList.scrollTop = scrolled;
+    }
+  } catch {
+    // the gray underlines are still there, just without suggestions
+  } finally {
+    if (progressText.textContent === "Double-checking unsure words") progressText.textContent = "";
+  }
+}
+
+// --- fixing a word from the transcript: double click it, type what it should say ---
+
+type FixedWord = { transcript: Transcript; course: string | null; lectures: number };
+
+const wordLetter = /[\p{L}\p{N}'’-]/u;
+
+function fixWordAt(event: MouseEvent) {
+  const line = event.currentTarget as HTMLElement;
+  const lineIndex = lineButtons.indexOf(line as HTMLButtonElement);
+  // a math line first turns back into the words that were said, then you pick one
+  if (showingMath() && lineIndex !== spokenLine) {
+    showSpoken(lineIndex);
+    return;
+  }
+  const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
+  const node = caret?.startContainer;
+  if (!caret || !node || node.nodeType !== Node.TEXT_NODE) return;
+
+  // grow out from where you clicked to the whole word
+  const text = node.textContent ?? "";
+  let start = caret.startOffset;
+  let end = caret.startOffset;
+  while (start > 0 && wordLetter.test(text[start - 1])) start--;
+  while (end < text.length && wordLetter.test(text[end])) end++;
+  while (end > start && /['’-]/.test(text[end - 1])) end--;
+  while (start < end && /['’-]/.test(text[start])) start++;
+  if (start === end) return;
+
+  const word = document.createRange();
+  word.setStart(node, start);
+  word.setEnd(node, end);
+  // where the word starts in the line's text, so "just this one" changes this spot
+  const before = document.createRange();
+  before.setStart(line.children[1], 0);
+  before.setEnd(node, start);
+  const near = Array.from(before.toString()).length;
+  openWordPopup(word.getBoundingClientRect(), text.slice(start, end), lineIndex, near);
+}
+
+// the course a lecture belongs to, if it's in one
+function courseOfLecture(path: string) {
+  const top = placeOfLecture(path)?.split("/")[0];
+  return places.find((place) => place.path === top && place.course)?.name ?? null;
+}
+
+function openWordPopup(box: DOMRect, heard: string, lineIndex: number, near: number) {
+  closeFixPopup();
+  stopFollowing();
+  fixPopupScroll = transcriptList.scrollTop;
+
+  const form = document.createElement("form");
+  form.className = "word-popup";
+
+  const heardInput = document.createElement("input");
+  heardInput.type = "text";
+  heardInput.value = heard;
+  heardInput.spellcheck = false;
+  const heardLabel = document.createElement("label");
+  heardLabel.append(Object.assign(document.createElement("span"), { textContent: "Lecture wrote" }), heardInput);
+
+  const wordInput = document.createElement("input");
+  wordInput.type = "text";
+  wordInput.value = heard;
+  wordInput.spellcheck = false;
+  const wordLabel = document.createElement("label");
+  wordLabel.append(Object.assign(document.createElement("span"), { textContent: "Should say" }), wordInput);
+
+  const course = courseOfLecture(currentPath);
+  const where = document.createElement("p");
+  where.className = "fix-heard";
+  where.textContent = course ? `All of them fixes every ${course} lecture` : "All of them fixes this whole lecture";
+
+  const justThis = document.createElement("button");
+  justThis.type = "button";
+  justThis.className = "text-button";
+  justThis.textContent = "Just this one";
+
+  const fix = document.createElement("button");
+  fix.type = "submit";
+  fix.className = "download-button";
+  fix.textContent = "All of them";
+
+  const buttons = document.createElement("div");
+  buttons.className = "fix-buttons";
+  buttons.append(justThis, fix);
+  form.append(heardLabel, wordLabel, where, buttons);
+
+  justThis.addEventListener("click", async () => {
+    justThis.disabled = true;
+    try {
+      const transcript = await invoke<Transcript>("change_one_word", {
+        path: currentPath,
+        line: lineIndex,
+        near,
+        heard: heardInput.value,
+        word: wordInput.value,
+      });
+      const scrolled = transcriptList.scrollTop;
+      drawLines(transcript);
+      transcriptList.scrollTop = scrolled;
+    } catch (error) {
+      where.textContent = String(error);
+      justThis.disabled = false;
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    fix.disabled = true;
+    try {
+      const result = await invoke<FixedWord>("fix_word", {
+        path: currentPath,
+        heard: heardInput.value,
+        word: wordInput.value,
+      });
+      const scrolled = transcriptList.scrollTop;
+      drawLines(result.transcript);
+      transcriptList.scrollTop = scrolled;
+      statusText.textContent =
+        result.course && result.lectures > 1 ? `Fixed in ${result.lectures} ${result.course} lectures` : "";
+      refreshLectureList();
+    } catch (error) {
+      where.textContent = String(error);
+      fix.disabled = false;
+    }
+  });
+
+  fixPopup.replaceChildren(form);
+  fixPopup.hidden = false;
+  placePopup(box);
+  wordInput.focus();
+  wordInput.select();
+}
+
+// under the word, kept inside the window
+function placePopup(box: DOMRect) {
+  const width = fixPopup.offsetWidth;
+  const height = fixPopup.offsetHeight;
+  const left = Math.min(Math.max(8, box.left + box.width / 2 - width / 2), window.innerWidth - width - 8);
+  // flip above the word when there's no room under it
+  const top = box.bottom + 8 + height > window.innerHeight - 8 ? box.top - 8 - height : box.bottom + 8;
+  fixPopup.style.left = `${left}px`;
+  fixPopup.style.top = `${top}px`;
+}
+
+// --- the popup for a fixed word: change it back or keep it ---
+
+const fixPopup = document.createElement("div");
+fixPopup.className = "fix-popup";
+fixPopup.hidden = true;
+fixPopup.setAttribute("role", "dialog");
+document.body.append(fixPopup);
+let fixPopupWord: HTMLElement | undefined;
+let fixPopupScroll = 0;
+
+function openFixPopup(word: HTMLElement, line: number, fix: number, heard: string) {
+  closeFixPopup();
+  fixPopupWord = word;
+  fixPopupScroll = transcriptList.scrollTop;
+  word.classList.add("active");
+
+  const label = document.createElement("p");
+  label.className = "fix-heard";
+  label.append("Heard ");
+  const heardWord = document.createElement("strong");
+  heardWord.textContent = heard;
+  label.append(heardWord);
+
+  const changeBack = document.createElement("button");
+  changeBack.type = "button";
+  changeBack.className = "text-button";
+  changeBack.textContent = "Change back";
+  changeBack.addEventListener("click", () => updateFix("change_back_fix", line, fix));
+
+  const keep = document.createElement("button");
+  keep.type = "button";
+  keep.className = "text-button";
+  keep.textContent = "Keep";
+  keep.addEventListener("click", () => updateFix("keep_fix", line, fix));
+
+  const buttons = document.createElement("div");
+  buttons.className = "fix-buttons";
+  buttons.append(changeBack, keep);
+
+  // the same fix all over this lecture can be kept in one go
+  const fixedWord = word.textContent ?? "";
+  const sameFixes = lineButtons.reduce(
+    (count, button) =>
+      count +
+      [...button.querySelectorAll(".fixed-word")].filter(
+        (other) => other.textContent?.toLowerCase() === fixedWord.toLowerCase(),
+      ).length,
+    0,
+  );
+  if (sameFixes > 1) {
+    const keepAll = document.createElement("button");
+    keepAll.type = "button";
+    keepAll.className = "text-button";
+    keepAll.textContent = `Keep all ${sameFixes}`;
+    keepAll.addEventListener("click", () => updateAll(fixedWord));
+    buttons.append(keepAll);
+  }
+  fixPopup.replaceChildren(label, buttons);
+  fixPopup.hidden = false;
+  placePopup(word.getBoundingClientRect());
+  changeBack.focus();
+}
+
+function closeFixPopup() {
+  fixPopup.hidden = true;
+  fixPopupWord?.classList.remove("active");
+  fixPopupWord = undefined;
+}
+
+async function updateAll(word: string) {
+  const scrolled = transcriptList.scrollTop;
+  try {
+    drawLines(await invoke<Transcript>("keep_all_fixes", { path: currentPath, word }));
+    transcriptList.scrollTop = scrolled;
+  } catch (error) {
+    statusText.textContent = String(error);
+    closeFixPopup();
+  }
+}
+
+async function updateFix(command: "change_back_fix" | "keep_fix", line: number, fix: number) {
+  const scrolled = transcriptList.scrollTop;
+  try {
+    const transcript = await invoke<Transcript>(command, { path: currentPath, line, fix });
+    drawLines(transcript);
+    transcriptList.scrollTop = scrolled;
+  } catch (error) {
+    statusText.textContent = String(error);
+    closeFixPopup();
+  }
+}
+
+document.addEventListener("click", (event) => {
+  if (!fixPopup.hidden && !fixPopup.contains(event.target as Node) && event.target !== fixPopupWord) closeFixPopup();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  // first the popup closes, then the spoken line goes back to math
+  if (!fixPopup.hidden) {
+    closeFixPopup();
+  } else if (spokenLine >= 0) {
+    showSpoken(-1);
+  }
+});
+// it sits under the word, so it goes away once the words scroll out from under it
+transcriptList.addEventListener("scroll", () => {
+  if (Math.abs(transcriptList.scrollTop - fixPopupScroll) > 8) closeFixPopup();
+});
+
 function playFrom(index: number) {
   player.currentTime = segments[index].start_ms / 1000;
   player.play();
+  followAgain();
 }
 
-// highlight whichever line is playing right now
-player.addEventListener("timeupdate", () => {
+// --- following along: the transcript keeps the playing line in view until you scroll yourself ---
+
+const backToPlaying = document.querySelector<HTMLButtonElement>("#back-to-playing")!;
+let following = true;
+
+function stopFollowing() {
+  following = false;
+  updateBackToPlaying();
+}
+
+// pressing play, skipping or clicking a line brings it back to where you are, once.
+// it goes by where the audio is now, not the line that was lit before you clicked
+function followAgain() {
+  following = true;
+  showPlayingLine();
+  updateBackToPlaying();
+}
+
+function updateBackToPlaying() {
+  backToPlaying.hidden = following || player.paused || currentLine < 0;
+}
+
+// only things you do count, the smooth scrolling the app does itself doesn't
+transcriptList.addEventListener("wheel", stopFollowing, { passive: true });
+transcriptList.addEventListener("touchmove", stopFollowing, { passive: true });
+transcriptList.addEventListener("pointerdown", (event) => {
+  // grabbing the scrollbar
+  if (event.target === transcriptList) stopFollowing();
+});
+transcriptList.addEventListener("keydown", (event) => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) stopFollowing();
+});
+backToPlaying.addEventListener("click", () => {
+  followAgain();
+  lineButtons[currentLine]?.scrollIntoView({ block: "center", behavior: "smooth" });
+});
+player.addEventListener("play", followAgain);
+player.addEventListener("pause", updateBackToPlaying);
+player.addEventListener("seeked", followAgain);
+
+// highlight whichever line is playing right now, and keep it in view while following
+function showPlayingLine() {
   const nowMs = player.currentTime * 1000;
   const playing = segments.findIndex((segment) => nowMs >= segment.start_ms && nowMs < segment.end_ms);
-  if (playing === currentLine) return;
-
-  lineButtons[currentLine]?.classList.remove("current");
-  currentLine = playing;
-
-  const line = lineButtons[currentLine];
-  if (line) {
-    line.classList.add("current");
-    line.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  if (playing !== currentLine) {
+    lineButtons[currentLine]?.classList.remove("current");
+    currentLine = playing;
+    lineButtons[currentLine]?.classList.add("current");
   }
+  if (following) lineButtons[currentLine]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+player.addEventListener("timeupdate", () => {
+  skipHidden();
+  const before = currentLine;
+  if (following) {
+    // only scroll when the line changes, not on every tick
+    const nowMs = player.currentTime * 1000;
+    const segment = segments[currentLine];
+    if (segment && nowMs >= segment.start_ms && nowMs < segment.end_ms) return updateBackToPlaying();
+  }
+  showPlayingLine();
+  if (before !== currentLine) updateBackToPlaying();
 });
 
 // --- the play bar ---
@@ -439,9 +1075,13 @@ async function openLecture(path: string, jumpToLine?: number) {
     // opening a lecture from the sidebar closes the model screen (unless there's no model yet)
     if (!setup.hidden && modelStatus?.current) hideSetup();
     statusText.textContent = "";
+    if (!coursePage.hidden) closeCourse();
     showTranscript(path, transcript);
+    setSaveTo(placeOfLecture(path));
 
     if (jumpToLine !== undefined) {
+      // a search result goes to that line, not where you left off
+      resumeSpot = false;
       lineButtons[jumpToLine]?.scrollIntoView({ block: "center" });
       playFrom(jumpToLine);
     }
@@ -453,37 +1093,39 @@ async function openLecture(path: string, jumpToLine?: number) {
 // --- sidebar: saved lectures and search ---
 
 function highlightOpenLecture() {
-  for (const button of lectureList.querySelectorAll<HTMLButtonElement>(".lecture-item")) {
-    button.classList.toggle("open", button.dataset.path === currentPath);
+  for (const row of lectureList.querySelectorAll<HTMLElement>(".lecture-item, .lecture-row")) {
+    row.classList.toggle("open", row.dataset.path === currentPath);
   }
 }
 
 async function refreshLectureList() {
-  const [lectures, folders] = await Promise.all([
+  const [lectures, allPlaces] = await Promise.all([
     invoke<LectureSummary[]>("list_lectures"),
-    invoke<string[]>("list_folders"),
+    invoke<Place[]>("list_places"),
   ]);
-  folderNames = folders;
+  places = allPlaces;
+  updateRecordInto();
   lectureList.replaceChildren();
 
-  // folders first, then whatever isn't in one (new recordings land there)
-  for (const folder of folders) {
-    lectureList.append(buildFolder(folder, lectures.filter((lecture) => lecture.folder === folder)));
+  // courses and folders first, then whatever isn't in one (new recordings land there)
+  for (const place of places.filter((place) => !place.path.includes("/"))) {
+    lectureList.append(buildPlace(place, lectures));
   }
   for (const lecture of lectures.filter((lecture) => !lecture.folder)) {
     lectureList.append(editing ? buildEditableLecture(lecture) : buildLecture(lecture));
   }
 
   sidebarEmpty.textContent = "Your lectures will show up here after you record one.";
-  sidebarEmpty.hidden = lectures.length > 0 || folders.length > 0 || !searchResults.hidden;
+  sidebarEmpty.hidden = lectures.length > 0 || places.length > 0 || !searchResults.hidden;
   highlightOpenLecture();
 }
 
-// --- organizing the list: folders, names, moving and deleting ---
-// folders are real folders in Documents/Lecture, so Finder shows the same thing
+// --- organizing the list: courses, folders, names, moving and deleting ---
+// both are real folders in Documents/Lecture, so Finder shows the same thing.
+// courses sit at the top and can have folders inside them, one level deep
 
 let editing = false;
-let folderNames: string[] = [];
+let places: Place[] = [];
 const closedFolders = new Set<string>(loadClosedFolders());
 
 function loadClosedFolders(): string[] {
@@ -500,6 +1142,11 @@ function saveClosedFolders() {
   } catch {
     // forgetting which folders were closed isn't a problem
   }
+}
+
+// "Math 172 › Homework" for menus
+function placeLabel(path: string) {
+  return path.split("/").join(" › ");
 }
 
 // what a lecture is called until you name it.
@@ -532,8 +1179,23 @@ const icons = {
   grip: svgIcon('<circle cx="7.5" cy="5" r="1" /><circle cx="12.5" cy="5" r="1" /><circle cx="7.5" cy="10" r="1" /><circle cx="12.5" cy="10" r="1" /><circle cx="7.5" cy="15" r="1" /><circle cx="12.5" cy="15" r="1" />'),
   pencil: svgIcon('<path d="M12.5 4.5l3 3L8 15H5v-3z" />'),
   folder: svgIcon('<path d="M3 6.5V15h14V7.5H9.5L8 5.5H3z" />'),
+  folderOpen: svgIcon('<path d="M3 15V5.5h5l1.5 2H15V9" /><path d="M3 15l2.2-6H18l-2.2 6z" />'),
+  course: svgIcon('<path d="M5.5 3.5H15v13H5.5A1.5 1.5 0 0 1 4 15V5a1.5 1.5 0 0 1 1.5-1.5z" /><path d="M4 15a1.5 1.5 0 0 1 1.5-1.5H15" />'),
+  courseOpen: svgIcon('<path d="M10 6c-1.5-1.2-3.5-1.5-6-1.5v10c2.5 0 4.5.3 6 1.5 1.5-1.2 3.5-1.5 6-1.5v-10c-2.5 0-4.5.3-6 1.5z" /><path d="M10 6v10" />'),
+  words: svgIcon('<path d="M4 5.5h9M4 10h12M4 14.5h7" /><circle cx="15.5" cy="5.5" r="1.5" /><circle cx="13.5" cy="14.5" r="1.5" />'),
+  newFolder: svgIcon('<path d="M3 6.5V15h14V7.5H9.5L8 5.5H3z" /><path d="M10 9.5v4M8 11.5h4" />'),
   trash: svgIcon('<path d="M4.5 6h11M8 6V4.5h4V6M6 6l.7 9.5h6.6L14 6" />'),
 };
+
+function iconButton(icon: string, label: string) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-button";
+  button.innerHTML = icon;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  return button;
+}
 
 function buildLecture(lecture: LectureSummary) {
   const item = document.createElement("li");
@@ -561,7 +1223,8 @@ function buildLecture(lecture: LectureSummary) {
   return item;
 }
 
-// in edit mode a lecture can be renamed, moved (dragged or picked from the menu) and deleted
+// in edit mode clicking a lecture still opens it (so you can see what you're about to delete),
+// and it can be renamed, dragged, added to a course or folder, and deleted
 function buildEditableLecture(lecture: LectureSummary) {
   const name = lectureName(lecture);
   const item = document.createElement("li");
@@ -575,47 +1238,42 @@ function buildEditableLecture(lecture: LectureSummary) {
 
   const text = document.createElement("div");
   text.className = "edit-text";
-  const renameButton = document.createElement("button");
-  renameButton.type = "button";
-  renameButton.className = "rename-button";
-  renameButton.textContent = name;
-  renameButton.title = "Rename";
+  const title = document.createElement("span");
+  title.className = "row-name";
+  title.textContent = name;
   const details = document.createElement("span");
   details.className = "lecture-details";
   details.textContent = lectureDetails(lecture);
-  text.append(renameButton, details);
+  text.append(title, details);
 
-  renameButton.addEventListener("click", () => {
-    editInPlace(renameButton, lecture.title ?? "", "Name this lecture", async (title) => {
-      await invoke("rename_lecture", { path: lecture.path, title });
-      if (currentPath === lecture.path) showLectureName(title);
+  const rename = iconButton(icons.pencil, `Rename ${name}`);
+  rename.addEventListener("click", () => {
+    editInPlace(title, lecture.title ?? "", "Name this lecture", async (newTitle) => {
+      await invoke("rename_lecture", { path: lecture.path, title: newTitle });
+      if (currentPath === lecture.path) showLectureName(newTitle);
     });
   });
 
-  const move = document.createElement("select");
-  move.className = "move-select";
-  move.setAttribute("aria-label", `Move ${name} to a folder`);
-  move.add(new Option("Move", "", true, true));
-  move.options[0].disabled = true;
-  if (lecture.folder) move.add(new Option("Out of the folder", ""));
-  for (const folder of folderNames) {
-    if (folder !== lecture.folder) move.add(new Option(folder, folder));
+  const addTo = document.createElement("select");
+  addTo.className = "move-select";
+  addTo.setAttribute("aria-label", `Add ${name} to a course or folder`);
+  addTo.add(new Option("Add to", "", true, true));
+  addTo.options[0].disabled = true;
+  if (lecture.folder) addTo.add(new Option("No course or folder", ""));
+  for (const place of places) {
+    if (place.path !== lecture.folder) addTo.add(new Option(placeLabel(place.path), place.path));
   }
-  move.addEventListener("change", () => moveLecture(lecture.path, move.value || null));
+  addTo.addEventListener("change", () => moveLecture(lecture.path, addTo.value || null));
 
   // a folder icon with the real menu laid invisibly over it, so it opens the normal Mac menu
-  const moveButton = document.createElement("span");
-  moveButton.className = "icon-button move-button";
-  moveButton.title = "Move to a folder";
-  moveButton.innerHTML = icons.folder;
-  moveButton.append(move);
-  moveButton.hidden = move.options.length === 1;
+  const addToButton = document.createElement("span");
+  addToButton.className = "icon-button move-button";
+  addToButton.title = "Add to a course or folder";
+  addToButton.innerHTML = icons.folder;
+  addToButton.append(addTo);
+  addToButton.hidden = addTo.options.length === 1;
 
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "icon-button";
-  remove.innerHTML = icons.trash;
-  remove.setAttribute("aria-label", `Delete ${name}`);
+  const remove = iconButton(icons.trash, `Delete ${name}`);
   askFirst(remove, "Delete?", async () => {
     await invoke("delete_lecture", { path: lecture.path });
     if (currentPath === lecture.path) forgetOpenLecture();
@@ -624,16 +1282,28 @@ function buildEditableLecture(lecture: LectureSummary) {
   });
 
   item.addEventListener("pointerdown", (event) => startPress(event, item));
+  item.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).closest("button, select, input")) return;
+    openLecture(lecture.path);
+  });
 
-  item.append(grip, text, moveButton, remove);
+  const actions = document.createElement("div");
+  actions.className = "row-actions";
+  actions.append(rename, addToButton, remove);
+  item.append(grip, text, actions);
   return item;
 }
 
-function buildFolder(folder: string, lectures: LectureSummary[]) {
+// a course or folder, with the folders inside it (if it's at the top) and its lectures
+function buildPlace(place: Place, lectures: LectureSummary[]) {
+  const inside = places.filter((other) => other.path.startsWith(`${place.path}/`));
+  const own = lectures.filter((lecture) => lecture.folder === place.path);
+  const total = own.length + lectures.filter((lecture) => lecture.folder?.startsWith(`${place.path}/`)).length;
+
   const item = document.createElement("li");
-  item.className = "folder";
-  item.dataset.folder = folder;
-  const open = !closedFolders.has(folder);
+  item.className = place.course ? "folder course" : "folder";
+  item.dataset.folder = place.path;
+  const open = !closedFolders.has(place.path);
 
   const header = document.createElement("div");
   header.className = "folder-header";
@@ -642,61 +1312,118 @@ function buildFolder(folder: string, lectures: LectureSummary[]) {
   toggle.type = "button";
   toggle.className = "folder-toggle";
   toggle.setAttribute("aria-expanded", String(open));
-  toggle.innerHTML = icons.chevron;
+  const chevron = document.createElement("span");
+  chevron.className = "chevron";
+  chevron.innerHTML = icons.chevron;
+  const kind = document.createElement("span");
+  kind.className = "place-icon";
+  if (place.course) kind.innerHTML = open ? icons.courseOpen : icons.course;
+  else kind.innerHTML = open ? icons.folderOpen : icons.folder;
   const name = document.createElement("span");
   name.className = "folder-name";
-  name.textContent = folder;
+  name.textContent = place.name;
   const count = document.createElement("span");
   count.className = "folder-count";
-  count.textContent = String(lectures.length);
-  toggle.append(name, count);
+  count.textContent = String(total);
+  toggle.append(chevron, kind, name, count);
   toggle.addEventListener("click", () => {
-    if (closedFolders.has(folder)) closedFolders.delete(folder);
-    else closedFolders.add(folder);
+    if (closedFolders.has(place.path)) closedFolders.delete(place.path);
+    else closedFolders.add(place.path);
     saveClosedFolders();
     refreshLectureList();
   });
-  header.append(toggle);
+  const actions = document.createElement("div");
+  actions.className = "row-actions";
+  header.append(toggle, actions);
 
-  if (editing) {
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "icon-button";
-    rename.innerHTML = icons.pencil;
-    rename.setAttribute("aria-label", `Rename ${folder}`);
-    rename.addEventListener("click", () => {
-      editInPlace(name, folder, "Folder name", async (newName) => {
-        const renamed = await invoke<string>("rename_folder", { name: folder, newName });
-        if (closedFolders.delete(folder)) closedFolders.add(renamed);
-        saveClosedFolders();
-        // the open lecture's path has the folder name in it
-        if (currentPath.includes(`/${folder}/`)) await openLecture(currentPath.replace(`/${folder}/`, `/${renamed}/`));
-      });
-    });
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "icon-button";
-    remove.innerHTML = icons.trash;
-    remove.setAttribute("aria-label", `Delete the ${folder} folder`);
-    askFirst(remove, lectures.length > 0 ? "Remove? Lectures stay" : "Remove?", async () => {
-      const openPath = currentPath;
-      await invoke("delete_folder", { name: folder });
-      closedFolders.delete(folder);
-      saveClosedFolders();
-      if (openPath.includes(`/${folder}/`)) await openLecture(openPath.replace(`/${folder}/`, "/"));
-      await refreshLectureList();
-    });
-    header.append(rename, remove);
+  if (place.course) {
+    const words = iconButton(icons.words, `${place.name} word fixes`);
+    words.classList.add("course-button");
+    words.addEventListener("click", () => openCourse(place.path));
+    actions.append(words);
   }
 
   const list = document.createElement("ul");
   list.className = "folder-lectures";
-  list.hidden = !open || lectures.length === 0;
-  for (const lecture of lectures) list.append(editing ? buildEditableLecture(lecture) : buildLecture(lecture));
+
+  if (editing) {
+    // a folder inside, only from the top level (one level deep)
+    if (!place.path.includes("/")) {
+      const addFolder = iconButton(icons.newFolder, `New folder in ${place.name}`);
+      addFolder.addEventListener("click", () => {
+        closedFolders.delete(place.path);
+        list.hidden = false;
+        askForName(list, "Folder name", (newName) =>
+          invoke("create_place", { name: newName, parent: place.path, course: false }),
+        );
+      });
+      actions.append(addFolder);
+    }
+
+    // a course can go back to being a plain folder (its lectures stay)
+    if (place.course) {
+      const makeFolder = iconButton(icons.folder, `Make ${place.name} a folder`);
+      askFirst(makeFolder, "Make it a folder?", async () => {
+        await invoke("make_folder", { folder: place.path });
+        if (openCourseName === place.path && !coursePage.hidden) closeCourse();
+        await refreshLectureList();
+      });
+      actions.append(makeFolder);
+    }
+
+    // a plain folder at the top can become a course
+    if (!place.course && !place.path.includes("/")) {
+      const makeCourse = iconButton(icons.course, `Make ${place.name} a course`);
+      makeCourse.addEventListener("click", async () => {
+        try {
+          await invoke("make_course", { folder: place.path });
+          await refreshLectureList();
+        } catch (error) {
+          statusText.textContent = String(error);
+        }
+      });
+      actions.append(makeCourse);
+    }
+
+    const rename = iconButton(icons.pencil, `Rename ${place.name}`);
+    rename.addEventListener("click", () => {
+      editInPlace(name, place.name, place.course ? "Course name" : "Folder name", async (newName) => {
+        const renamed = await invoke<string>("rename_place", { path: place.path, newName });
+        if (closedFolders.delete(place.path)) closedFolders.add(renamed);
+        saveClosedFolders();
+        // the open lecture's path has the name in it
+        if (currentPath.includes(`/${place.path}/`)) await openLecture(currentPath.replace(`/${place.path}/`, `/${renamed}/`));
+      });
+    });
+
+    const remove = iconButton(icons.trash, `Remove ${place.name}`);
+    askFirst(remove, total > 0 ? "Remove? Lectures stay" : "Remove?", async () => {
+      await invoke("delete_place", { path: place.path });
+      closedFolders.delete(place.path);
+      saveClosedFolders();
+      if (currentPath.includes(`/${place.path}/`)) forgetOpenLecture();
+      await refreshLectureList();
+    });
+    actions.append(rename, remove);
+  }
+
+  list.hidden = !open || (own.length === 0 && inside.length === 0);
+  for (const inner of inside) list.append(buildPlace(inner, lectures));
+  for (const lecture of own) list.append(editing ? buildEditableLecture(lecture) : buildLecture(lecture));
 
   item.append(header, list);
   return item;
+}
+
+// a text box at the top of a list for naming something new
+function askForName(list: HTMLElement, placeholder: string, create: (name: string) => Promise<unknown>) {
+  const item = document.createElement("li");
+  const spot = document.createElement("span");
+  item.append(spot);
+  list.prepend(item);
+  editInPlace(spot, "", placeholder, async (name) => {
+    if (name) await create(name);
+  });
 }
 
 // --- dragging lectures ---
@@ -827,15 +1554,15 @@ function updateSlot(current: Drag) {
 
   const folder = under.closest<HTMLElement>(".folder");
   if (folder) {
-    const list = folder.querySelector<HTMLElement>(".folder-lectures")!;
+    const list = folder.querySelector<HTMLElement>(":scope > .folder-lectures")!;
     // over a closed or empty folder's name: open it so there's somewhere to drop
     if (list.hidden) {
       if (current.openedList && current.openedList !== list) current.openedList.hidden = true;
       list.hidden = false;
       current.openedList = list;
     }
-    const overHeader = under.closest(".folder-header");
-    moveSlot(current, list, overHeader ? list.firstElementChild : rowAfter(list, y));
+    const overHeader = under.closest(".folder-header")?.parentElement === folder;
+    moveSlot(current, list, overHeader ? (rowsIn(list)[0] ?? null) : rowAfter(list, y));
     return;
   }
 
@@ -1020,6 +1747,7 @@ function askFirst(button: HTMLButtonElement, question: string, action: () => Pro
 
 function setEditing(on: boolean) {
   editing = on;
+  lectureList.classList.toggle("editing", on);
   editListButton.textContent = on ? "Done" : "Edit";
   editListButton.setAttribute("aria-pressed", String(on));
   editBar.hidden = !on;
@@ -1028,14 +1756,17 @@ function setEditing(on: boolean) {
 
 editListButton.addEventListener("click", () => setEditing(!editing));
 
-newFolderButton.addEventListener("click", () => {
-  const item = document.createElement("li");
-  const placeholder = document.createElement("span");
-  item.append(placeholder);
-  lectureList.prepend(item);
-  editInPlace(placeholder, "", "Folder name", async (name) => {
-    if (name) await invoke("create_folder", { name });
+// a new course opens its page right away, so word fixes can go in
+newCourseButton.addEventListener("click", () => {
+  askForName(lectureList, "Course name", async (name) => {
+    const path = await invoke<string>("create_place", { name, parent: null, course: true });
+    await refreshLectureList();
+    await openCourse(path);
   });
+});
+
+newFolderButton.addEventListener("click", () => {
+  askForName(lectureList, "Folder name", (name) => invoke("create_place", { name, parent: null, course: false }));
 });
 
 // puts <mark> around every match without ever treating the text as HTML
@@ -1121,6 +1852,7 @@ exportButton.addEventListener("click", async () => {
     const exportedPath = await invoke<string>("export_lecture", {
       path: currentPath,
       title: `${lectureTitle.textContent}, ${lectureWhen.textContent}`,
+      math: showingMath(),
     });
     // just the file name, the full path has your Mac username in it
     const fileName = exportedPath.split("/").pop();
@@ -1156,6 +1888,7 @@ retranscribeButton.addEventListener("click", async () => {
     transcribingLabel = "";
     // only show it if they're still looking at the same lecture
     if (currentPath === path) showTranscript(path, transcript);
+    if (SHOW_UNSURE) crossCheck(path);
     const seconds = Math.round((Date.now() - started) / 1000);
     statusText.textContent = `Transcribed again in ${seconds}s. The old version is saved next to it as .before.json`;
     await refreshLectureList();
@@ -1183,6 +1916,7 @@ async function transcribe(path: string, marks: number[], totalMs: number) {
     const seconds = Math.round((Date.now() - started) / 1000);
     statusText.textContent = `Transcribed in ${seconds}s`;
     showTranscript(path, transcript);
+    if (SHOW_UNSURE) crossCheck(path);
   } finally {
     transcribingLabel = "";
   }
@@ -1211,6 +1945,7 @@ recordButton.addEventListener("click", async () => {
         const markNote = stopped.marks.length > 0 ? `, ${stopped.marks.length} marked` : "";
         statusText.textContent = `Transcript ready${markNote}`;
         showTranscript(stopped.path, stopped.transcript);
+        if (SHOW_UNSURE) crossCheck(stopped.path);
       } else {
         await transcribe(stopped.path, stopped.marks, recordedMs);
       }
@@ -1221,7 +1956,7 @@ recordButton.addEventListener("click", async () => {
 
       // start recording and the timer
       player.pause();
-      await invoke("start_recording");
+      await invoke("start_recording", { folder: recordInto.value || null });
       startTime = Date.now();
       markCount = 0;
       timer.textContent = "00:00";
@@ -1239,6 +1974,147 @@ recordButton.addEventListener("click", async () => {
     recordButton.disabled = false;
   }
 });
+
+// --- courses ---
+// any folder can be a course. its word list fixes how those words come out in its lectures
+
+type CourseWord = { word: string; heard_as: string[] };
+type Course = { subject: string | null; words: CourseWord[] };
+
+let openCourseName = "";
+let openCourseSettings: Course = { subject: null, words: [] };
+
+// which course a new recording goes into, remembered between launches
+// "Save to" follows whatever you're looking at: open a lecture in Math 172 (or its course page)
+// and new recordings go there too. you can still pick something else before recording
+function setSaveTo(place: string | null) {
+  if (recordButton.classList.contains("recording")) return;
+  recordInto.value = place && places.some((known) => known.path === place) ? place : "";
+}
+
+// the course or folder a lecture is in, from its path ("…/Math 172/Homework/lecture-1.wav")
+function placeOfLecture(path: string) {
+  const folder = path.slice(0, path.lastIndexOf("/"));
+  const matches = places.filter((place) => folder.endsWith(`/${place.path}`));
+  // the longest match, so a lecture in "Math 172/Homework" isn't put in "Math 172"
+  return matches.sort((a, b) => b.path.length - a.path.length)[0]?.path ?? null;
+}
+
+function updateRecordInto() {
+  const wanted = recordInto.value;
+  recordInto.replaceChildren(
+    new Option("Lectures", ""),
+    ...places.map((place) => new Option(placeLabel(place.path), place.path)),
+  );
+  recordInto.value = places.some((place) => place.path === wanted) ? wanted : "";
+  recordIntoLabel.hidden = places.length === 0;
+}
+
+
+async function openCourse(folder: string) {
+  if (recordButton.classList.contains("recording")) return;
+  try {
+    openCourseSettings = await invoke<Course>("course_settings", { folder });
+  } catch (error) {
+    statusText.textContent = String(error);
+    return;
+  }
+  openCourseName = folder;
+  courseName.textContent = folder;
+  courseSubject.value = openCourseSettings.subject ?? "";
+  courseStatus.textContent = "";
+  setSaveTo(folder);
+  drawWords();
+
+  setup.hidden = true;
+  recorder.hidden = true;
+  playback.hidden = true;
+  coursePage.hidden = false;
+  heardInput.focus();
+}
+
+function closeCourse() {
+  coursePage.hidden = true;
+  recorder.hidden = false;
+  playback.hidden = segments.length === 0;
+  // the open lecture may have just had words fixed
+  if (currentPath.includes(`/${openCourseName}/`)) openLecture(currentPath);
+}
+
+function drawWords() {
+  wordList.replaceChildren(
+    ...openCourseSettings.words.map((entry, index) => {
+      const item = document.createElement("li");
+      item.className = "word-row";
+      const text = document.createElement("div");
+      text.className = "word-fix";
+      const wrote = document.createElement("span");
+      wrote.className = "wrote";
+      wrote.textContent = entry.heard_as.length > 0 ? entry.heard_as.join(", ") : "capitals";
+      if (entry.heard_as.length === 0) wrote.classList.add("plain");
+      const arrow = document.createElement("span");
+      arrow.className = "arrow";
+      arrow.textContent = "→";
+      arrow.setAttribute("aria-label", "becomes");
+      const word = document.createElement("span");
+      word.className = "word";
+      word.textContent = entry.word;
+      text.append(wrote, arrow, word);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "icon-button";
+      remove.innerHTML = icons.trash;
+      remove.setAttribute("aria-label", `Remove ${entry.word}`);
+      remove.addEventListener("click", () => {
+        openCourseSettings.words.splice(index, 1);
+        saveCourse();
+      });
+
+      item.append(text, remove);
+      return item;
+    }),
+  );
+}
+
+async function saveCourse() {
+  try {
+    const changed = await invoke<number>("save_course", { folder: openCourseName, course: openCourseSettings });
+    openCourseSettings = await invoke<Course>("course_settings", { folder: openCourseName });
+    drawWords();
+    courseStatus.textContent = changed > 0 ? `Fixed ${changed} ${changed === 1 ? "lecture" : "lectures"}` : "";
+    await refreshLectureList();
+  } catch (error) {
+    courseStatus.textContent = String(error);
+  }
+}
+
+wordForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const word = wordInput.value.trim();
+  if (!word) {
+    wordInput.focus();
+    return;
+  }
+  const heardAs = heardInput.value.split(",").map((heard) => heard.trim()).filter(Boolean);
+
+  // adding a word that's already there just adds to what it's heard as
+  const existing = openCourseSettings.words.find((entry) => entry.word.toLowerCase() === word.toLowerCase());
+  if (existing) existing.heard_as.push(...heardAs);
+  else openCourseSettings.words.push({ word, heard_as: heardAs });
+
+  wordInput.value = "";
+  heardInput.value = "";
+  heardInput.focus();
+  saveCourse();
+});
+
+courseSubject.addEventListener("change", () => {
+  openCourseSettings.subject = courseSubject.value || null;
+  saveCourse();
+});
+
+courseBack.addEventListener("click", closeCourse);
 
 // --- speech model: first launch and switching ---
 
@@ -1280,6 +2156,7 @@ function pickModel(choice: ModelChoice) {
 }
 
 function showSetup(firstLaunch: boolean) {
+  coursePage.hidden = true;
   setup.hidden = false;
   recorder.hidden = true;
   playback.hidden = true;

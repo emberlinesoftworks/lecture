@@ -402,7 +402,13 @@ button {
   transition: transform 200ms var(--ease-out);
 }
 
-.folder-toggle[aria-expanded="true"] svg {
+/* only the arrow turns, the folder or book next to it opens instead */
+.chevron {
+  display: grid;
+  flex: none;
+}
+
+.folder-toggle[aria-expanded="true"] .chevron svg {
   transform: rotate(90deg);
 }
 
@@ -1505,3 +1511,612 @@ body.dragging-lecture * {
     display: none;
   }
 }
+
+/* --- picking a course before recording --- */
+
+.record-into {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.record-into[hidden] {
+  display: none;
+}
+
+.record-into select,
+.course-field select {
+  padding: 5px 28px 5px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M6 8l4 4 4-4' fill='none' stroke='%23a99089' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")
+      no-repeat right 9px center / 14px,
+    var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  appearance: none;
+}
+
+.record-into select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- a folder's course page --- */
+
+.course-button {
+  opacity: 0.55;
+}
+
+.folder-header:hover .course-button,
+.course-button:focus-visible {
+  opacity: 1;
+}
+
+.course-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+  max-width: 640px;
+  padding-top: 8px;
+}
+
+.course-page[hidden] {
+  display: none;
+}
+
+.course-name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  font-stretch: 90%;
+}
+
+.course-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.course-words {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.course-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.course-help {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.word-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.word-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.course-tip {
+  margin: -4px 0 0;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
+.word-fix {
+  display: flex;
+  flex-direction: row !important;
+  align-items: baseline;
+  gap: 10px !important;
+  min-width: 0;
+}
+
+.wrote {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 14px;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 138, 92, 0.5);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arrow {
+  flex: none;
+  color: var(--accent-hot);
+}
+
+.word-form input {
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.word-form input::placeholder {
+  color: var(--text-faint);
+}
+
+.word-form input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.word-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.word-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.word-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.word {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.heard-as {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-status {
+  min-height: 1.4em;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .word-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* courses and folders in the list */
+.place-icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.folder.course > .folder-header .place-icon svg {
+  stroke: var(--accent-hot);
+}
+
+/* a folder inside a course */
+.folder-lectures .folder-toggle {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.row-name {
+  overflow: hidden;
+  padding: 2px 4px;
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lecture-row {
+  cursor: pointer;
+}
+
+.lecture-row.open {
+  background: var(--bg-elevated-2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lecture-row:hover {
+    background: var(--bg-elevated-2);
+  }
+}
+
+.edit-bar {
+  flex-wrap: wrap;
+}
+
+.wrote.plain {
+  text-decoration: none;
+}
+
+/* the buttons on a course, folder or lecture. normally they sit at the end of the row,
+   in edit mode they lie over the right edge and show up on hover so names aren't cut short */
+.row-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.folder-header,
+.lecture-row {
+  position: relative;
+}
+
+.editing .row-actions {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  padding-left: 24px;
+  background: linear-gradient(to right, transparent, var(--bg-elevated-2) 20px);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 140ms var(--ease-out);
+  pointer-events: none;
+}
+
+.editing .folder-header:hover > .row-actions,
+.editing .folder-header:focus-within > .row-actions,
+.editing .lecture-row:hover > .row-actions,
+.editing .lecture-row:focus-within > .row-actions,
+.editing .lecture-row.open > .row-actions,
+.editing .row-actions:has(.confirming) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.editing .folder-header:hover {
+  border-radius: 8px;
+  background: var(--bg-elevated-2);
+}
+
+/* the row being carried shouldn't show its buttons on the copy */
+.drag-ghost .row-actions {
+  display: none;
+}
+
+/* --- the recorder while reading a lecture: one slim line at the top --- */
+
+.reviewing .recorder {
+  flex-flow: row wrap;
+  justify-content: center;
+  gap: 10px 16px;
+  padding-top: 0;
+}
+
+.reviewing .timer {
+  font-size: 22px;
+  color: var(--text-muted);
+}
+
+.reviewing .meter {
+  display: none;
+}
+
+.reviewing .record {
+  gap: 8px;
+  padding: 7px 18px;
+  font-size: 14px;
+}
+
+.reviewing .record .dot {
+  width: 9px;
+  height: 9px;
+}
+
+/* messages (exported, transcribed again) get their own line under it */
+.reviewing .status {
+  flex-basis: 100%;
+  min-height: 0;
+  font-size: 13px;
+}
+
+.reviewing .status:empty,
+.reviewing .progress:empty {
+  display: none;
+}
+
+.reviewing .playback {
+  margin-top: 24px;
+}
+
+/* --- a word a course fix changed: underlined, click it to change it back or keep it --- */
+
+.fixed-word {
+  border-radius: 3px;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 160, 46, 0.7);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+  cursor: pointer;
+  transition: background 140ms var(--ease-out);
+}
+
+.fixed-word:hover,
+.fixed-word.active {
+  background: rgba(255, 160, 46, 0.16);
+}
+
+.fix-popup {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated-2);
+  box-shadow: 0 16px 32px -12px rgba(0, 0, 0, 0.8);
+}
+
+.fix-popup[hidden] {
+  display: none;
+}
+
+.fix-heard {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.fix-heard strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.fix-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+/* --- only the transcript scrolls while reading a lecture, the top stays put --- */
+
+.reviewing .app {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.reviewing .playback {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.reviewing .transcript {
+  flex: 1;
+  min-height: 0;
+  margin: 0 -12px;
+  padding: 0 12px 32px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - 32px), transparent);
+}
+
+/* same on a course page: the boxes stay at the top, the list of fixes scrolls */
+.app:has(> .course-page:not([hidden])) {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.course-page {
+  flex: 1;
+  min-height: 0;
+}
+
+.course-words {
+  flex: 1;
+  min-height: 0;
+}
+
+.word-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0 -8px;
+  padding: 0 8px 32px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - 32px), transparent);
+}
+
+/* shows up once you've scrolled away from the line that's playing */
+.playback {
+  position: relative;
+}
+
+.back-to-playing {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  z-index: 2;
+  padding: 8px 16px;
+  border-color: var(--line-strong);
+  background: var(--bg-elevated-2);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.9);
+  transform: translateX(-50%);
+}
+
+.back-to-playing[hidden] {
+  display: none;
+}
+
+/* double click a word in the transcript to fix it */
+.word-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 280px;
+}
+
+.word-popup label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.word-popup input {
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.word-popup input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.word-popup .fix-buttons {
+  justify-content: flex-end;
+}
+
+/* --- hiding lines --- */
+
+.transcript-line {
+  position: relative;
+}
+
+/* room on the right so the hide button never sits on top of words */
+.transcript-line .line {
+  padding-right: 64px;
+}
+
+.hide-line {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated-2);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+
+.transcript-line:hover .hide-line,
+.hide-line:focus-visible {
+  opacity: 1;
+}
+
+.hide-line:hover {
+  color: var(--text);
+}
+
+.hidden-lines button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin: 2px 0;
+  padding: 6px 12px 6px 88px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+
+.hidden-lines button:hover {
+  border-color: var(--accent);
+  color: var(--text-muted);
+}
+
+.hidden-show {
+  color: var(--accent-hot);
+}
+
+/* --- words whisper wasn't sure about --- */
+
+.unsure-word {
+  border-radius: 3px;
+  text-decoration: underline dotted;
+  text-decoration-color: rgba(240, 225, 220, 0.45);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+  cursor: pointer;
+  transition: background 140ms var(--ease-out);
+}
+
+.unsure-word:hover,
+.unsure-word.active {
+  background: rgba(240, 225, 220, 0.1);
+}
+
+.option-button {
+  border-color: var(--accent);
+  color: var(--accent-hot);
+}
+
+/* in a math course, the line you're fixing shows its spoken words */
+.line.spoken {
+  background: rgba(255, 160, 46, 0.07);
+  box-shadow: inset 2px 0 0 var(--accent-hot);
+}
+
