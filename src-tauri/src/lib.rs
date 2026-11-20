@@ -2,6 +2,7 @@ pub mod cooling;
 pub mod courses;
 pub mod crosscheck;
 pub mod dictionary;
+pub mod emphasis;
 pub mod lectures;
 pub mod mathtext;
 pub mod live;
@@ -469,6 +470,58 @@ fn sure_now(app: tauri::AppHandle, path: String, line: usize, word: usize) -> Re
     Ok(transcript)
 }
 
+// everything the professor said about the exam in one lecture, sorted the same way the course page does
+#[tauri::command]
+fn exam_notes(app: tauri::AppHandle, path: String, minutes_behind_utc: i64) -> Result<Vec<emphasis::SortedNote>, String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let transcript = lectures::load_transcript(&wav_path)?;
+    let course = lectures::course_for(&wav_path).map(|folder| courses::load_course(&folder)).unwrap_or_default();
+    let file = wav_path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let day = emphasis::day_of(lectures::recorded_at(&wav_path), minutes_behind_utc);
+    Ok(emphasis::sorted_notes(&transcript.lines, &file, &day, &course))
+}
+
+// you put an exam note somewhere yourself: moved it, said it isn't about an exam,
+// added a line Lecture missed, or put it back to automatic (clear)
+#[tauri::command]
+fn choose_exam(app: tauri::AppHandle, path: String, at_ms: i64, exam: Option<String>, added: bool, clear: bool) -> Result<(), String> {
+    let wav_path = lecture_file(&app, &path)?;
+    let folder = lectures::course_for(&wav_path).ok_or("This lecture isn't in a course")?;
+    let mut course = courses::load_course(&folder);
+    let file = wav_path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    emphasis::choose(&mut course, &file, at_ms, exam, added, clear);
+    courses::save_course(&folder, &course)
+}
+
+// renaming an exam on the course page keeps the notes you put under it
+#[tauri::command]
+fn rename_exam(app: tauri::AppHandle, folder: String, old: String, name: String, date: String) -> Result<(), String> {
+    let folder = course_folder(&app, &folder)?;
+    let mut course = courses::load_course(&folder);
+    emphasis::rename_exam(&mut course, &old, &name);
+    for exam in &mut course.exams {
+        if exam.name == old {
+            exam.name = name.clone();
+            exam.date = date.clone();
+        }
+    }
+    courses::save_course(&folder, &course)
+}
+
+// the course page's exam list: what was said about each exam, across every lecture in the course.
+// today and minutes_behind_utc come from the window so dates are in your time zone
+#[tauri::command]
+fn course_exam_notes(
+    app: tauri::AppHandle,
+    folder: String,
+    today: String,
+    minutes_behind_utc: i64,
+) -> Result<Vec<emphasis::ExamGroup>, String> {
+    let folder = course_folder(&app, &folder)?;
+    let course = courses::load_course(&folder);
+    Ok(emphasis::course_notes(&folder, &course, &today, minutes_behind_utc))
+}
+
 // each line with its math written out, for lectures in a math course (none for anything else)
 #[tauri::command]
 fn math_view(app: tauri::AppHandle, path: String) -> Result<Option<Vec<String>>, String> {
@@ -619,6 +672,10 @@ pub fn run() {
             keep_all_fixes,
             hide_lines,
             math_view,
+            exam_notes,
+            course_exam_notes,
+            choose_exam,
+            rename_exam,
             cross_check,
             sure_now,
             change_one_word,

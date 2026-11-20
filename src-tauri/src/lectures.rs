@@ -170,7 +170,7 @@ pub fn course_for(wav_path: &Path) -> Option<PathBuf> {
     [Some(folder), folder.parent()].into_iter().flatten().find(|dir| is_course(dir)).map(Path::to_path_buf)
 }
 
-fn subfolders(folder: &Path) -> Vec<String> {
+pub(crate) fn subfolders(folder: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
     let mut names: Vec<String> = entries
         .filter_map(|entry| entry.ok())
@@ -464,6 +464,17 @@ pub fn export_markdown(wav_path: &Path, title: &str, math: bool) -> Result<PathB
         markdown.push('\n');
     }
 
+    let notes = crate::emphasis::find(&transcript.lines);
+    if !notes.is_empty() {
+        markdown.push_str("## About the exam\n\n");
+        for note in &notes {
+            let said: Vec<&str> = transcript.lines[note.first_line..=note.last_line].iter().map(|line| line.text.as_str()).collect();
+            let label = if note.not_on_exam { " (not on the exam)" } else { "" };
+            markdown.push_str(&format!("- **[{}]**{label} {}\n", format_time(transcript.lines[note.first_line].start_ms), said.join(" ")));
+        }
+        markdown.push('\n');
+    }
+
     markdown.push_str("## Transcript\n\n");
     for (index, line) in transcript.lines.iter().enumerate() {
         if line.hidden {
@@ -509,7 +520,7 @@ pub fn recordings_in(folder: &Path) -> Vec<PathBuf> {
 }
 
 // recordings are named lecture-<unix seconds>.wav
-fn recorded_at(wav_path: &Path) -> u64 {
+pub fn recorded_at(wav_path: &Path) -> u64 {
     wav_path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -634,7 +645,7 @@ mod tests {
         let transcript = Transcript { title: None, lines: vec![line(0, "The Gordon series.")], marks: Vec::new() };
         fs::write(wav.with_extension("json"), serde_json::to_string(&transcript).unwrap()).unwrap();
 
-        let course = Course { subject: None, words: vec![CourseWord { word: "Maclaurin".into(), heard_as: vec!["Gordon".into()] }] };
+        let course = Course { words: vec![CourseWord { word: "Maclaurin".into(), heard_as: vec!["Gordon".into()] }], ..Default::default() };
         assert_eq!(fix_words_in_folder(&folder, &course).unwrap(), 1);
         assert_eq!(load_transcript(&wav).unwrap().lines[0].text, "The Maclaurin series.");
         assert!(fs::read_to_string(wav.with_extension("original.json")).unwrap().contains("Gordon"));

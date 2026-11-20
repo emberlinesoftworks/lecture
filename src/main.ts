@@ -306,11 +306,13 @@ function showTranscript(audioPath: string, transcript: Transcript) {
   resumeSpot = true;
   mathLines = null;
   spokenLine = -1;
+  examNotesBox.hidden = true;
   drawLines(transcript);
   transcriptList.scrollTop = 0;
   following = true;
   lastHidden = -1;
   loadMath(audioPath);
+  loadExamNotes(audioPath);
 
   // a recording with nothing in it would otherwise just leave a blank screen
   if (segments.length === 0) {
@@ -396,12 +398,16 @@ function drawLines(transcript: Transcript) {
     line.type = "button";
     line.className = "line";
     time.textContent = formatTime(segment.start_ms);
+    // just the words, so an exam tag in front of them isn't counted as part of the line
+    const words = document.createElement("span");
+    words.className = "line-text";
     const math = index === spokenLine ? undefined : mathLines?.[index];
     if (math !== undefined) {
-      text.textContent = math;
+      words.textContent = math;
     } else {
-      text.append(...lineText(segment, index));
+      words.append(...lineText(segment, index));
     }
+    text.append(words);
     line.classList.toggle("spoken", index === spokenLine);
     line.append(time, text);
     line.addEventListener("click", () => playFrom(index));
@@ -410,9 +416,12 @@ function drawLines(transcript: Transcript) {
     const hide = document.createElement("button");
     hide.type = "button";
     hide.className = "hide-line";
-    hide.textContent = "Hide";
-    hide.title = "Hide this line. Shift-click to hide everything since the last line you hid";
-    hide.addEventListener("click", (event) => hideFrom(index, event.shiftKey));
+    hide.textContent = "•••";
+    hide.setAttribute("aria-label", "More for this line");
+    hide.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openLineMenu(hide, index);
+    });
 
     // a stretch of hidden lines shows up as one row you can open back up
     if (segment.hidden && !segments[index - 1]?.hidden) {
@@ -481,6 +490,158 @@ function showSpoken(index: number) {
   if (shownTranscript) redrawKeepingScroll(shownTranscript);
 }
 
+// --- about the exam: everything the professor said about it, found by rust (emphasis.rs) ---
+// dates, review days, sample questions, what's on it and what isn't. a list you can open
+// above the transcript, each one plays from where it was said
+
+type ExamNote = {
+  first_line: number;
+  last_line: number;
+  not_on_exam: boolean;
+  on_exam: boolean;
+  date: boolean;
+  material: boolean;
+  // just the part about the exam
+  said: string;
+  // the exams it's under, like "Test 4"
+  exams: string[];
+  start_ms: number;
+  // you put it there yourself
+  chosen: boolean;
+};
+
+const NEXT_EXAM = "Next exam";
+const NOT_ABOUT_AN_EXAM = "not-about-an-exam";
+const SORT_AUTOMATICALLY = "sort-automatically";
+
+// the menu on each exam note: which exam it's about. a wrong guess gets fixed once and stays fixed
+function moveMenu(path: string, atMs: number, current: string, chosen: boolean, exams: CourseExam[], done: () => void) {
+  const menu = document.createElement("select");
+  menu.className = "exam-move";
+  menu.setAttribute("aria-label", "Which exam this is about");
+  const add = (value: string, label: string) => menu.append(new Option(label, value));
+  for (const exam of exams) add(exam.name, exam.name);
+  if (!exams.some((exam) => exam.name === current)) add(current, current);
+  if (current !== NEXT_EXAM) add(NEXT_EXAM, NEXT_EXAM);
+  add(NOT_ABOUT_AN_EXAM, "Not about an exam");
+  if (chosen) add(SORT_AUTOMATICALLY, "Sort automatically");
+  menu.value = current;
+  menu.addEventListener("change", async () => {
+    const value = menu.value;
+    try {
+      await invoke("choose_exam", {
+        path,
+        atMs,
+        exam: value === NOT_ABOUT_AN_EXAM || value === SORT_AUTOMATICALLY ? null : value,
+        added: false,
+        clear: value === SORT_AUTOMATICALLY,
+      });
+      done();
+    } catch (error) {
+      statusText.textContent = String(error);
+    }
+  });
+  return menu;
+}
+
+// the little labels on an exam note
+function examTags(note: { not_on_exam: boolean; on_exam: boolean; date: boolean; material: boolean }, exams: string[] = []) {
+  const names = [
+    ...exams,
+    ...(note.not_on_exam ? ["Not on the exam"] : []),
+    ...(note.on_exam ? ["On the exam"] : []),
+    ...(note.date ? ["Date"] : []),
+    ...(note.material ? ["Study material"] : []),
+  ];
+  if (names.length === 0) return null;
+  const tags = document.createElement("span");
+  tags.className = "exam-note-tags";
+  for (const name of names) {
+    const tag = document.createElement("span");
+    tag.className = "exam-note-tag";
+    tag.textContent = name;
+    tags.append(tag);
+  }
+  return tags;
+}
+
+const examNotesBox = document.querySelector<HTMLElement>("#exam-notes")!;
+const examNotesToggle = document.querySelector<HTMLButtonElement>("#exam-notes-toggle")!;
+const examNotesCount = document.querySelector<HTMLElement>("#exam-notes-count")!;
+const examNotesList = document.querySelector<HTMLOListElement>("#exam-notes-list")!;
+
+// the course the open lecture is in, so its exam notes can be moved between your exams
+let lectureCourse: { folder: string; exams: CourseExam[] } | null = null;
+
+async function loadExamNotes(path: string) {
+  try {
+    const folder = placeOfLecture(path)?.split("/")[0];
+    const inCourse = folder !== undefined && places.some((place) => place.path === folder && place.course);
+    const [notes, course] = await Promise.all([
+      invoke<ExamNote[]>("exam_notes", { path, minutesBehindUtc: new Date().getTimezoneOffset() }),
+      inCourse ? invoke<Course>("course_settings", { folder }) : Promise.resolve(null),
+    ]);
+    if (currentPath !== path) return;
+    lectureCourse = course && folder ? { folder, exams: course.exams ?? [] } : null;
+    showExamNotes(notes);
+  } catch {
+    examNotesBox.hidden = true;
+  }
+}
+
+function showExamNotes(notes: ExamNote[]) {
+  examNotesBox.hidden = notes.length === 0;
+  examNotesCount.textContent = String(notes.length);
+  examNotesList.replaceChildren(
+    ...notes.map((note) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      const time = document.createElement("time");
+      time.textContent = formatTime(segments[note.first_line]?.start_ms ?? 0);
+      const said = document.createElement("span");
+      said.className = "exam-note-text";
+      said.textContent = note.said;
+      // in a course the menu already says which exam, outside one the name is a tag
+      // ("Next exam" just means it isn't under one of yours, so no tag for that)
+      const names = lectureCourse ? [] : note.exams.filter((name) => name !== NEXT_EXAM);
+      const tags = examTags(note, names);
+      button.append(time, ...(tags ? [tags] : []), said);
+      button.addEventListener("click", () => {
+        lineButtons[note.first_line]?.scrollIntoView({ block: "center", behavior: "smooth" });
+        playFrom(note.first_line);
+      });
+      item.append(button);
+      if (lectureCourse) {
+        const path = currentPath;
+        item.append(moveMenu(path, note.start_ms, note.exams[0] ?? NEXT_EXAM, note.chosen, lectureCourse.exams, () => loadExamNotes(path)));
+      }
+      return item;
+    }),
+  );
+  setExamNotesOpen(savedExamNotesOpen());
+}
+
+function savedExamNotesOpen() {
+  try {
+    return localStorage.getItem("examNotesOpen") === "true";
+  } catch {
+    return false;
+  }
+}
+
+function setExamNotesOpen(open: boolean) {
+  examNotesList.hidden = !open;
+  examNotesToggle.setAttribute("aria-expanded", String(open));
+  try {
+    localStorage.setItem("examNotesOpen", String(open));
+  } catch {
+    // it just won't be remembered
+  }
+}
+
+examNotesToggle.addEventListener("click", () => setExamNotesOpen(examNotesList.hidden === true));
+
 // --- hiding lines: side conversations, someone's name ---
 
 let lastHidden = -1;
@@ -503,6 +664,72 @@ function hiddenRow(first: number) {
   row.addEventListener("click", () => setHidden(first, last, false));
   item.append(row);
   return item;
+}
+
+// the ••• on a line: hide it, or add it to the exam notes when Lecture missed it
+function openLineMenu(anchor: HTMLElement, index: number) {
+  closeFixPopup();
+  fixPopupWord = anchor;
+  fixPopupScroll = transcriptList.scrollTop;
+  const buttons = document.createElement("div");
+  buttons.className = "line-menu";
+  const item = (label: string, action: () => void) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-button";
+    button.textContent = label;
+    button.addEventListener("click", action);
+    buttons.append(button);
+  };
+  item("Hide", () => {
+    closeFixPopup();
+    hideFrom(index, false);
+  });
+  if (lastHidden >= 0 && Math.abs(lastHidden - index) > 1) {
+    item("Hide back to the last line you hid", () => {
+      closeFixPopup();
+      hideFrom(index, true);
+    });
+  }
+  if (lectureCourse) {
+    item("Add to exam notes", () => chooseExamFor(anchor, index));
+  }
+  fixPopup.replaceChildren(buttons);
+  fixPopup.hidden = false;
+  placePopup(anchor.getBoundingClientRect());
+  (buttons.firstElementChild as HTMLButtonElement).focus();
+}
+
+// which exam a line you're adding is about
+function chooseExamFor(anchor: HTMLElement, index: number) {
+  if (!lectureCourse) return;
+  const label = document.createElement("p");
+  label.className = "fix-heard";
+  label.textContent = "Which exam is this about?";
+  const buttons = document.createElement("div");
+  buttons.className = "line-menu";
+  const path = currentPath;
+  const names = [...lectureCourse.exams.map((exam) => exam.name), NEXT_EXAM];
+  for (const name of names) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-button";
+    button.textContent = name;
+    button.addEventListener("click", async () => {
+      try {
+        await invoke("choose_exam", { path, atMs: segments[index].start_ms, exam: name, added: true, clear: false });
+        closeFixPopup();
+        statusText.textContent = `Added to exam notes under ${name}`;
+        loadExamNotes(path);
+      } catch (error) {
+        statusText.textContent = String(error);
+      }
+    });
+    buttons.append(button);
+  }
+  fixPopup.replaceChildren(label, buttons);
+  placePopup(anchor.getBoundingClientRect());
+  (buttons.firstElementChild as HTMLButtonElement).focus();
 }
 
 function hideFrom(index: number, stretch: boolean) {
@@ -657,14 +884,16 @@ const wordLetter = /[\p{L}\p{N}'’-]/u;
 function fixWordAt(event: MouseEvent) {
   const line = event.currentTarget as HTMLElement;
   const lineIndex = lineButtons.indexOf(line as HTMLButtonElement);
-  // a math line first turns back into the words that were said, then you pick one
-  if (showingMath() && lineIndex !== spokenLine) {
+  // a line with math in it first turns back into the words that were said, then you pick one.
+  // a line without math already shows its words, so it goes straight to the fix
+  const hasMath = mathLines !== null && mathLines[lineIndex] !== segments[lineIndex]?.text;
+  if (hasMath && lineIndex !== spokenLine) {
     showSpoken(lineIndex);
     return;
   }
   const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
   const node = caret?.startContainer;
-  if (!caret || !node || node.nodeType !== Node.TEXT_NODE) return;
+  if (!caret || !node || node.nodeType !== Node.TEXT_NODE || !node.parentElement?.closest(".line-text")) return;
 
   // grow out from where you clicked to the whole word
   const text = node.textContent ?? "";
@@ -681,7 +910,7 @@ function fixWordAt(event: MouseEvent) {
   word.setEnd(node, end);
   // where the word starts in the line's text, so "just this one" changes this spot
   const before = document.createRange();
-  before.setStart(line.children[1], 0);
+  before.setStart(line.querySelector(".line-text")!, 0);
   before.setEnd(node, start);
   const near = Array.from(before.toString()).length;
   openWordPopup(word.getBoundingClientRect(), text.slice(start, end), lineIndex, near);
@@ -885,7 +1114,9 @@ async function updateFix(command: "change_back_fix" | "keep_fix", line: number, 
 }
 
 document.addEventListener("click", (event) => {
-  if (!fixPopup.hidden && !fixPopup.contains(event.target as Node) && event.target !== fixPopupWord) closeFixPopup();
+  // composedPath still has the popup when the button clicked was just swapped out for new ones
+  const inside = event.composedPath().includes(fixPopup);
+  if (!fixPopup.hidden && !inside && event.target !== fixPopupWord) closeFixPopup();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
@@ -896,6 +1127,21 @@ document.addEventListener("keydown", (event) => {
     showSpoken(-1);
   }
 });
+// a line showing its spoken words goes back to math when you click anywhere else
+// (Escape works too, and so does finishing a fix)
+document.addEventListener("click", (event) => {
+  if (spokenLine < 0 || !fixPopup.hidden) return;
+  const path = event.composedPath();
+  if (lineButtons[spokenLine] && path.includes(lineButtons[spokenLine])) return;
+  showSpoken(-1);
+});
+
+// double clicking a word opens the fix popup, so the Mac's own double-click
+// word selection would just leave a highlight behind. dragging to select still works
+transcriptList.addEventListener("mousedown", (event) => {
+  if (event.detail > 1) event.preventDefault();
+});
+
 // it sits under the word, so it goes away once the words scroll out from under it
 transcriptList.addEventListener("scroll", () => {
   if (Math.abs(transcriptList.scrollTop - fixPopupScroll) > 8) closeFixPopup();
@@ -1018,6 +1264,7 @@ function drawScrubMarks() {
     });
     scrubMarks.append(tick);
   }
+
 }
 
 playButton.addEventListener("click", togglePlaying);
@@ -1979,7 +2226,9 @@ recordButton.addEventListener("click", async () => {
 // any folder can be a course. its word list fixes how those words come out in its lectures
 
 type CourseWord = { word: string; heard_as: string[] };
-type Course = { subject: string | null; words: CourseWord[] };
+type CourseExam = { name: string; date: string };
+type ExamChoice = { file: string; at_ms: number; exam: string | null; added: boolean };
+type Course = { subject: string | null; words: CourseWord[]; exams?: CourseExam[]; exam_choices?: ExamChoice[] };
 
 let openCourseName = "";
 let openCourseSettings: Course = { subject: null, words: [] };
@@ -2025,6 +2274,8 @@ async function openCourse(folder: string) {
   courseStatus.textContent = "";
   setSaveTo(folder);
   drawWords();
+  drawExamDates();
+  loadCourseExams();
 
   setup.hidden = true;
   recorder.hidden = true;
@@ -2082,6 +2333,8 @@ async function saveCourse() {
     const changed = await invoke<number>("save_course", { folder: openCourseName, course: openCourseSettings });
     openCourseSettings = await invoke<Course>("course_settings", { folder: openCourseName });
     drawWords();
+    drawExamDates();
+    loadCourseExams();
     courseStatus.textContent = changed > 0 ? `Fixed ${changed} ${changed === 1 ? "lecture" : "lectures"}` : "";
     await refreshLectureList();
   } catch (error) {
@@ -2245,3 +2498,220 @@ refreshModelStatus()
   .catch((error) => (statusText.textContent = String(error)));
 
 refreshLectureList().catch((error) => (statusText.textContent = String(error)));
+
+// --- the course page's Exams tab: your exam dates, and what was said about each exam ---
+
+const tabWords = document.querySelector<HTMLButtonElement>("#tab-words")!;
+const tabExams = document.querySelector<HTMLButtonElement>("#tab-exams")!;
+const courseWordsTab = document.querySelector<HTMLElement>("#course-words")!;
+const courseExamsTab = document.querySelector<HTMLElement>("#course-exams")!;
+const examForm = document.querySelector<HTMLFormElement>("#exam-form")!;
+const examNameInput = document.querySelector<HTMLInputElement>("#exam-name")!;
+const examDateInput = document.querySelector<HTMLInputElement>("#exam-date")!;
+const examDates = document.querySelector<HTMLUListElement>("#exam-dates")!;
+const examGroups = document.querySelector<HTMLElement>("#exam-groups")!;
+
+type CourseNote = {
+  path: string;
+  recorded_at: number;
+  line: number;
+  start_ms: number;
+  said: string;
+  not_on_exam: boolean;
+  on_exam: boolean;
+  date: boolean;
+  material: boolean;
+  chosen: boolean;
+};
+type ExamGroup = { name: string; date: string | null; past: boolean; notes: CourseNote[] };
+
+function showCourseTab(exams: boolean) {
+  courseWordsTab.hidden = exams;
+  courseExamsTab.hidden = !exams;
+  tabWords.classList.toggle("on", !exams);
+  tabExams.classList.toggle("on", exams);
+  tabWords.setAttribute("aria-selected", String(!exams));
+  tabExams.setAttribute("aria-selected", String(exams));
+}
+
+tabWords.addEventListener("click", () => showCourseTab(false));
+tabExams.addEventListener("click", () => showCourseTab(true));
+
+// "2026-12-01" as "Tue, Dec 1"
+function formatExamDate(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function todayString() {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+function drawExamDates() {
+  const exams = openCourseSettings.exams ?? [];
+  examDates.replaceChildren(
+    ...exams.map((exam, index) => {
+      const item = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "exam-date-name";
+      name.textContent = exam.name;
+      const when = document.createElement("span");
+      when.className = "exam-date-when";
+      when.textContent = formatExamDate(exam.date);
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "text-button";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => editExam(item, exam));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "text-button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        openCourseSettings.exams = exams.filter((_, other) => other !== index);
+        saveCourse();
+      });
+      item.append(name, when, edit, remove);
+      return item;
+    }),
+  );
+}
+
+// the professor moved the exam, or you named it wrong. notes you put under it stay with it
+function editExam(item: HTMLLIElement, exam: CourseExam) {
+  const form = document.createElement("form");
+  form.className = "exam-edit";
+  const name = document.createElement("input");
+  name.type = "text";
+  name.value = exam.name;
+  name.setAttribute("aria-label", "Exam");
+  const date = document.createElement("input");
+  date.type = "date";
+  date.value = exam.date;
+  date.setAttribute("aria-label", "Date");
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "text-button";
+  save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "text-button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", drawExamDates);
+  form.append(name, date, save, cancel);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!name.value.trim() || !date.value) {
+      courseStatus.textContent = "Give the exam a name and a date";
+      return;
+    }
+    try {
+      await invoke("rename_exam", { folder: openCourseName, old: exam.name, name: name.value.trim(), date: date.value });
+      courseStatus.textContent = "";
+      reloadCourse();
+    } catch (error) {
+      courseStatus.textContent = String(error);
+    }
+  });
+  item.replaceChildren(form);
+  name.focus();
+}
+
+examForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = examNameInput.value.trim();
+  const date = examDateInput.value;
+  if (!name || !date) {
+    courseStatus.textContent = "Give the exam a name and a date";
+    return;
+  }
+  openCourseSettings.exams = [...(openCourseSettings.exams ?? []), { name, date }];
+  examNameInput.value = "";
+  examDateInput.value = "";
+  saveCourse();
+  examNameInput.focus();
+});
+
+// after a choice is saved straight to the course file, read it back so saving
+// something else on this page doesn't write over it
+async function reloadCourse() {
+  try {
+    openCourseSettings = await invoke<Course>("course_settings", { folder: openCourseName });
+    drawExamDates();
+    loadCourseExams();
+  } catch (error) {
+    courseStatus.textContent = String(error);
+  }
+}
+
+async function loadCourseExams() {
+  const folder = openCourseName;
+  try {
+    const groups = await invoke<ExamGroup[]>("course_exam_notes", {
+      folder,
+      today: todayString(),
+      minutesBehindUtc: new Date().getTimezoneOffset(),
+    });
+    if (folder === openCourseName) drawExamGroups(groups);
+  } catch (error) {
+    examGroups.textContent = String(error);
+  }
+}
+
+function drawExamGroups(groups: ExamGroup[]) {
+  if (groups.every((group) => group.notes.length === 0)) {
+    const empty = document.createElement("p");
+    empty.className = "course-tip";
+    empty.textContent = "Nothing about exams yet. When your professor talks about an exam, it shows up here.";
+    examGroups.replaceChildren(empty);
+    return;
+  }
+  examGroups.replaceChildren(
+    ...groups.map((group) => {
+      // ones that already happened start folded closed
+      const section = document.createElement("details");
+      section.className = "exam-group";
+      section.open = !group.past;
+      const summary = document.createElement("summary");
+      const name = document.createElement("span");
+      name.className = "exam-group-name";
+      name.textContent = group.name;
+      summary.append(name);
+      if (group.date) {
+        const when = document.createElement("span");
+        when.className = "exam-group-when";
+        when.textContent = formatExamDate(group.date);
+        summary.append(when);
+      }
+      const count = document.createElement("span");
+      count.className = "exam-notes-count";
+      count.textContent = String(group.notes.length);
+      summary.append(count);
+
+      const list = document.createElement("ol");
+      list.className = "exam-notes-list";
+      for (const note of group.notes) {
+        const item = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        const time = document.createElement("time");
+        time.className = "exam-note-when";
+        const day = new Date(note.recorded_at * 1000).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+        time.textContent = `${day}, ${formatTime(note.start_ms)}`;
+        const said = document.createElement("span");
+        said.className = "exam-note-text";
+        said.textContent = note.said;
+        const tags = examTags(note);
+        button.append(time, ...(tags ? [tags] : []), said);
+        button.addEventListener("click", () => openLecture(note.path, note.line));
+        item.append(button, moveMenu(note.path, note.start_ms, group.name, note.chosen, openCourseSettings.exams ?? [], reloadCourse));
+        list.append(item);
+      }
+      section.append(summary, list);
+      return section;
+    }),
+  );
+}
+

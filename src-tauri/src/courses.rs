@@ -15,6 +15,34 @@ pub struct Course {
     pub subject: Option<String>,
     #[serde(default)]
     pub words: Vec<CourseWord>,
+    // the exams and their dates, so things said about "the exam" land under the right one
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exams: Vec<Exam>,
+    // where you put exam notes yourself, so a wrong guess stays fixed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exam_choices: Vec<ExamChoice>,
+}
+
+// one exam note you sorted by hand. it's found again by the lecture's file and the time it was said,
+// not the line number, so it survives transcribing the lecture again
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ExamChoice {
+    pub file: String,
+    pub at_ms: i64,
+    // which exam it's about. none means it isn't about an exam at all
+    #[serde(default)]
+    pub exam: Option<String>,
+    // a line you added yourself, that Lecture didn't find on its own
+    #[serde(default)]
+    pub added: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Exam {
+    // like "Test 4" or "Final exam"
+    pub name: String,
+    // YYYY-MM-DD
+    pub date: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -39,7 +67,21 @@ pub fn load_course(folder: &Path) -> Course {
 
 pub fn save_course(folder: &Path, course: &Course) -> Result<(), String> {
     // tidy it up before saving: no blanks, no repeats
-    let mut cleaned = Course { subject: course.subject.clone().filter(|s| !s.trim().is_empty()), words: Vec::new() };
+    let mut cleaned = Course {
+        subject: course.subject.clone().filter(|s| !s.trim().is_empty()),
+        words: Vec::new(),
+        exams: Vec::new(),
+        exam_choices: course.exam_choices.clone(),
+    };
+    for exam in &course.exams {
+        let name = exam.name.trim();
+        let date = exam.date.trim();
+        let real_date = date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-';
+        if !name.is_empty() && real_date {
+            cleaned.exams.push(Exam { name: name.to_string(), date: date.to_string() });
+        }
+    }
+    cleaned.exams.sort_by(|a, b| a.date.cmp(&b.date));
     for entry in &course.words {
         let word = entry.word.trim();
         if word.is_empty() || cleaned.words.iter().any(|w| w.word.eq_ignore_ascii_case(word)) {
@@ -322,6 +364,8 @@ mod tests {
                 CourseWord { word: "denominator".into(), heard_as: vec!["terminator".into()] },
                 CourseWord { word: "Maple".into(), heard_as: vec![] },
             ],
+            exams: Vec::new(),
+            exam_choices: Vec::new(),
         }
     }
 
@@ -384,6 +428,8 @@ mod tests {
         let only_maclaurin = Course {
             subject: None,
             words: vec![CourseWord { word: "Maclaurin".into(), heard_as: vec!["Gordon".into()] }],
+            exams: Vec::new(),
+            exam_choices: Vec::new(),
         };
         fix_words(&only_maclaurin, &mut lines);
         // then the course gets another word, which lands before nothing but changes the length after
@@ -493,6 +539,8 @@ mod tests {
                 CourseWord { word: "coulomb".into(), heard_as: vec![] },
                 CourseWord { word: "".into(), heard_as: vec!["x".into()] },
             ],
+            exams: Vec::new(),
+            exam_choices: Vec::new(),
         };
         save_course(&folder, &messy).unwrap();
         let loaded = load_course(&folder);

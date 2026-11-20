@@ -93,7 +93,7 @@ pub fn with_built_in(course: &Course) -> Course {
             .collect();
         words.push(CourseWord { word: word.to_string(), heard_as });
     }
-    Course { subject: course.subject.clone(), words }
+    Course { subject: course.subject.clone(), words, exams: course.exams.clone(), exam_choices: course.exam_choices.clone() }
 }
 
 #[cfg(test)]
@@ -103,7 +103,7 @@ mod tests {
     use crate::transcriber::Segment;
 
     fn fixed(subject: Option<&str>, text: &str) -> String {
-        let course = with_built_in(&Course { subject: subject.map(str::to_string), words: Vec::new() });
+        let course = with_built_in(&Course { subject: subject.map(str::to_string), ..Default::default() });
         let mut lines = vec![Segment { text: text.to_string(), ..Default::default() }];
         fix_words(&course, &mut lines);
         lines.remove(0).text
@@ -129,6 +129,8 @@ mod tests {
         let course = Course {
             subject: Some("math".into()),
             words: vec![CourseWord { word: "McCord".into(), heard_as: Vec::new() }],
+            exams: Vec::new(),
+            exam_choices: Vec::new(),
         };
         let mut lines = vec![Segment { text: "Professor McCord said so".into(), ..Default::default() }];
         fix_words(&with_built_in(&course), &mut lines);

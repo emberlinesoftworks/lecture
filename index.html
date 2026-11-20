@@ -137,8 +137,12 @@
             </select>
           </label>
 
-          <div class="course-words">
-            <h2 class="course-heading">Word fixes</h2>
+          <div class="course-tabs" role="tablist">
+            <button id="tab-words" class="course-tab on" type="button" role="tab" aria-selected="true">Word fixes</button>
+            <button id="tab-exams" class="course-tab" type="button" role="tab" aria-selected="false">Exams</button>
+          </div>
+
+          <div id="course-words" class="course-words">
             <form id="word-form" class="word-form">
               <label>
                 <span>Lecture wrote</span>
@@ -152,8 +156,25 @@
             </form>
             <p class="course-tip">Separate more than one with commas</p>
             <ul id="word-list" class="word-list"></ul>
-            <p id="course-status" class="course-status" role="status"></p>
           </div>
+
+          <div id="course-exams" class="course-exams" hidden>
+            <form id="exam-form" class="word-form">
+              <label>
+                <span>Exam</span>
+                <input id="exam-name" type="text" autocomplete="off" spellcheck="false" />
+              </label>
+              <label>
+                <span>Date</span>
+                <input id="exam-date" type="date" />
+              </label>
+              <button class="download-button" type="submit">Add</button>
+            </form>
+            <ul id="exam-dates" class="exam-dates"></ul>
+            <div id="exam-groups" class="exam-groups"></div>
+          </div>
+
+          <p id="course-status" class="course-status" role="status"></p>
         </section>
 
         <section id="recorder" class="recorder">
@@ -215,6 +236,13 @@
             <span id="total-time" class="player-time">00:00</span>
             <button id="speed" class="player-speed" type="button" aria-label="Playback speed" title="Playback speed">1×</button>
           </div>
+          <section id="exam-notes" class="exam-notes" hidden>
+            <button id="exam-notes-toggle" class="exam-notes-toggle" type="button" aria-expanded="false" aria-controls="exam-notes-list">
+              <span>About the exam</span>
+              <span id="exam-notes-count" class="exam-notes-count"></span>
+            </button>
+            <ol id="exam-notes-list" class="exam-notes-list" hidden></ol>
+          </section>
           <ol id="transcript" class="transcript"></ol>
           <button id="back-to-playing" class="text-button back-to-playing" type="button" hidden>Back to playing</button>
         </section>
