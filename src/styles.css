@@ -2573,3 +2573,41 @@ body.dragging-lecture * {
   margin-top: 18px;
 }
 
+/* the full speed switch on the Speech model screen */
+.full-speed {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 520px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.full-speed[hidden] {
+  display: none;
+}
+
+.full-speed input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.full-speed-words {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.full-speed-name {
+  font-size: 14.5px;
+}
+
+.full-speed-note {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+

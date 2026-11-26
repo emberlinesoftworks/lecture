@@ -57,6 +57,9 @@ pub fn model_file(choice: Choice) -> &'static ModelFile {
 #[derive(Serialize, Deserialize, Default)]
 struct Settings {
     speech_model: Option<Choice>,
+    // imports and Transcribe again without the cooling breaks (see cooling.rs). off unless you turn it on
+    #[serde(default)]
+    full_speed: bool,
 }
 
 fn settings_path(models_folder: &Path) -> PathBuf {
@@ -70,11 +73,25 @@ fn load_settings(models_folder: &Path) -> Settings {
         .unwrap_or_default()
 }
 
-pub fn save_choice(models_folder: &Path, choice: Choice) -> Result<(), String> {
+// changes one setting and keeps the rest
+fn change_settings(models_folder: &Path, change: impl FnOnce(&mut Settings)) -> Result<(), String> {
     fs::create_dir_all(models_folder).map_err(|e| e.to_string())?;
-    let settings = Settings { speech_model: Some(choice) };
+    let mut settings = load_settings(models_folder);
+    change(&mut settings);
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(settings_path(models_folder), json).map_err(|e| e.to_string())
+}
+
+pub fn save_choice(models_folder: &Path, choice: Choice) -> Result<(), String> {
+    change_settings(models_folder, |settings| settings.speech_model = Some(choice))
+}
+
+pub fn save_full_speed(models_folder: &Path, full_speed: bool) -> Result<(), String> {
+    change_settings(models_folder, |settings| settings.full_speed = full_speed)
+}
+
+pub fn full_speed(models_folder: &Path) -> bool {
+    load_settings(models_folder).full_speed
 }
 
 fn is_downloaded(models_folder: &Path, choice: Choice) -> bool {
@@ -97,6 +114,7 @@ pub struct ModelStatus {
     pub current: Option<Choice>,
     pub fast_downloaded: bool,
     pub accurate_downloaded: bool,
+    pub full_speed: bool,
 }
 
 pub fn status(models_folder: &Path) -> ModelStatus {
@@ -104,6 +122,7 @@ pub fn status(models_folder: &Path) -> ModelStatus {
         current: current_choice(models_folder),
         fast_downloaded: is_downloaded(models_folder, Choice::Fast),
         accurate_downloaded: is_downloaded(models_folder, Choice::Accurate),
+        full_speed: full_speed(models_folder),
     }
 }
 
@@ -222,6 +241,17 @@ pub fn sha1_of(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saving_one_setting_keeps_the_other() {
+        let folder = std::env::temp_dir().join(format!("lecture-settings-{}", std::process::id()));
+        save_full_speed(&folder, true).unwrap();
+        save_choice(&folder, Choice::Fast).unwrap();
+        assert!(full_speed(&folder));
+        save_full_speed(&folder, false).unwrap();
+        assert_eq!(load_settings(&folder).speech_model, Some(Choice::Fast));
+        std::fs::remove_dir_all(folder).ok();
+    }
+
     use super::*;
 
     fn empty_folder(name: &str) -> PathBuf {

@@ -266,6 +266,11 @@ struct ImportedLecture {
 fn transcribe_file(app: &tauri::AppHandle, model_path: &std::path::Path, wav_path: &std::path::Path) -> Result<Vec<transcriber::Segment>, String> {
     let report = progress_reporter(app);
     let resting_app = app.clone();
+    // full speed is a setting on the Speech model screen: no breaks, and the Mac gets warm
+    let full_speed = models_folder(app).is_ok_and(|folder| models::full_speed(&folder));
+    if full_speed {
+        return transcriber::transcribe(model_path, wav_path, report);
+    }
     let pacer = cooling::Pacer::new();
     let paced: transcriber::ProgressReport = std::sync::Arc::new(move |done_ms| {
         report(done_ms);
@@ -665,6 +670,12 @@ fn export_lecture(app: tauri::AppHandle, path: String, title: String, math: bool
     Ok(markdown_path.display().to_string())
 }
 
+// the full speed switch on the Speech model screen
+#[tauri::command]
+fn set_full_speed(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    models::save_full_speed(&models_folder(&app)?, on)
+}
+
 #[tauri::command]
 fn model_status(app: tauri::AppHandle) -> Result<models::ModelStatus, String> {
     Ok(models::status(&models_folder(&app)?))
@@ -734,6 +745,7 @@ pub fn run() {
             course_exam_notes,
             choose_exam,
             import_media,
+            set_full_speed,
             already_imported,
             rename_exam,
             cross_check,

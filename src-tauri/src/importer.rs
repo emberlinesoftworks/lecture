@@ -112,21 +112,16 @@ fn alike(a: &[f32], b: &[f32]) -> f32 {
     together / (spread_a * spread_b).sqrt()
 }
 
-// brings one file into a folder as a lecture. it's dated when the file was made (so a video of
-// last Tuesday's class sorts with last Tuesday), moved a second later if another lecture already
-// has that time, since a lecture's time is also its file name. returns the new recording and how long it is
+// brings one file into a folder as a lecture, dated the day you add it, so it shows up at the top of
+// your list. (a file's own date was tried first: a professor's posted video came out as January 2019,
+// the day it was exported.) a second later if another lecture already has that time, since a lecture's
+// time is also its file name. returns the new recording and how long it is
 pub fn import_into(source: &Path, folder: &Path, taken: &std::collections::HashSet<u64>) -> Result<(std::path::PathBuf, i64), String> {
+    if !source.is_file() {
+        return Err("Couldn't open that file".into());
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let metadata = std::fs::metadata(source).map_err(|e| format!("Couldn't open that file: {e}"))?;
-    let made = metadata
-        .created()
-        .or_else(|_| metadata.modified())
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .filter(|&seconds| seconds > 0 && seconds <= now)
-        .unwrap_or(now);
-    let mut stamp = made;
+    let mut stamp = now;
     while taken.contains(&stamp) || folder.join(format!("lecture-{stamp}.wav")).exists() {
         stamp += 1;
     }
@@ -298,14 +293,15 @@ mod tests {
         if let Some(source) = make(&folder, "class.m4a", &[&tone[..], &["-c:a", "aac"]].concat()) {
             let lectures = folder.join("lectures");
             std::fs::create_dir_all(&lectures).unwrap();
-            let made = std::fs::metadata(&source).unwrap().created().or_else(|_| std::fs::metadata(&source).unwrap().modified()).unwrap();
-            let made = made.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            let taken: std::collections::HashSet<u64> = [made].into();
+            // dated now, and a second later when that time is already a lecture
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let taken: std::collections::HashSet<u64> = (now..now + 5).collect();
             let (first, length_ms) = import_into(&source, &lectures, &taken).unwrap();
             assert!((4800..=5200).contains(&length_ms));
-            assert_eq!(first.file_name().unwrap().to_string_lossy(), format!("lecture-{}.wav", made + 1));
+            let stamp = |path: &std::path::Path| path.file_stem().unwrap().to_string_lossy().trim_start_matches("lecture-").parse::<u64>().unwrap();
+            assert!((now + 5..now + 10).contains(&stamp(&first)), "{}", first.display());
             let (second, _) = import_into(&source, &lectures, &taken).unwrap();
-            assert_eq!(second.file_name().unwrap().to_string_lossy(), format!("lecture-{}.wav", made + 2));
+            assert_eq!(stamp(&second), stamp(&first) + 1);
 
             let text = folder.join("broken.mp4");
             std::fs::write(&text, "not really a video").unwrap();

@@ -2413,6 +2413,7 @@ type ModelStatus = {
   current: ModelChoice | null;
   fast_downloaded: boolean;
   accurate_downloaded: boolean;
+  full_speed: boolean;
 };
 
 const modelLabels: Record<ModelChoice, string> = { fast: "Fast", accurate: "Most accurate" };
@@ -2451,6 +2452,9 @@ function showSetup(firstLaunch: boolean) {
   playback.hidden = true;
   setupTitle.textContent = firstLaunch ? "Welcome to Lecture" : "Speech model";
   setupBackButton.hidden = firstLaunch;
+  // a choice for later, not something to decide while setting up for the first time
+  fullSpeed.hidden = firstLaunch;
+  fullSpeedBox.checked = modelStatus?.full_speed ?? false;
   setupError.textContent = "";
   pickModel(modelStatus?.current ?? "accurate");
 }
@@ -2903,4 +2907,21 @@ async function importFiles(paths: string[]) {
     statusText.textContent = (added === 1 ? "Added and transcribed" : `Added and transcribed ${added} files`) + skippedNote;
   }
 }
+
+// --- full speed: imports and Transcribe again without the cooling breaks ---
+
+const fullSpeed = document.querySelector<HTMLElement>("#full-speed")!;
+const fullSpeedBox = document.querySelector<HTMLInputElement>("#full-speed-box")!;
+
+fullSpeedBox.addEventListener("change", async () => {
+  const on = fullSpeedBox.checked;
+  try {
+    await invoke("set_full_speed", { on });
+    if (modelStatus) modelStatus.full_speed = on;
+    setupError.textContent = "";
+  } catch (error) {
+    fullSpeedBox.checked = !on;
+    setupError.textContent = String(error);
+  }
+});
 
