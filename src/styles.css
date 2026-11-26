@@ -2450,3 +2450,76 @@ body.dragging-lecture * {
   text-align: left;
 }
 
+/* how far along transcribing a whole lecture is */
+.transcribe-bar {
+  width: min(320px, 100%);
+  height: 4px;
+  margin: 2px auto 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.transcribe-bar[hidden] {
+  display: none;
+}
+
+.transcribe-bar span {
+  display: block;
+  width: var(--done, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hot));
+  transition: width 400ms var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcribe-bar span {
+    transition: none;
+  }
+}
+
+/* while a file is dragged over the window */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: rgba(11, 6, 5, 0.72);
+  pointer-events: none;
+}
+
+.drop-overlay[hidden] {
+  display: none;
+}
+
+.drop-card {
+  padding: 28px 40px;
+  border: 1.5px dashed var(--accent-hot);
+  border-radius: 18px;
+  background: var(--bg-elevated);
+  text-align: center;
+}
+
+.drop-overlay.blocked .drop-card {
+  border-color: var(--line-strong);
+}
+
+.drop-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.drop-where {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.drop-where:empty {
+  display: none;
+}
+

@@ -13,7 +13,7 @@ use crate::live::PendingAudio;
 
 // whisper works at 16k, so there's no point saving more than that.
 // it also makes recordings a third of the size (about 145 MB for 75 minutes)
-const SAVE_RATE: u32 = 16_000;
+pub(crate) const SAVE_RATE: u32 = 16_000;
 
 struct Output {
     wav: hound::WavWriter<BufWriter<File>>,
@@ -204,7 +204,7 @@ fn write_mono<T: Copy>(
 
 // averages groups of samples to go from the mic's rate (usually 48k) down to 16k.
 // cpal hands us audio in small pieces, so it remembers where it was between them
-struct Downsampler {
+pub(crate) struct Downsampler {
     step: f64,
     position: f64,
     sum: f32,
@@ -212,7 +212,7 @@ struct Downsampler {
 }
 
 impl Downsampler {
-    fn new(from_rate: u32, to_rate: u32) -> Self {
+    pub(crate) fn new(from_rate: u32, to_rate: u32) -> Self {
         Self {
             step: (from_rate as f64 / to_rate as f64).max(1.0),
             position: 0.0,
@@ -222,7 +222,7 @@ impl Downsampler {
     }
 
     // returns a sample every time enough input has come in
-    fn push(&mut self, sample: f32) -> Option<f32> {
+    pub(crate) fn push(&mut self, sample: f32) -> Option<f32> {
         self.sum += sample;
         self.count += 1;
         self.position += 1.0;

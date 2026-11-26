@@ -3,6 +3,7 @@ pub mod courses;
 pub mod crosscheck;
 pub mod dictionary;
 pub mod emphasis;
+pub mod importer;
 pub mod lectures;
 pub mod mathtext;
 pub mod live;
@@ -220,6 +221,38 @@ fn progress_reporter(app: &tauri::AppHandle) -> transcriber::ProgressReport {
     std::sync::Arc::new(move |done_ms| {
         let _ = app.emit("transcribe-progress", done_ms);
     })
+}
+
+// a video or audio file you dropped on the window becomes a lecture in the Save to folder.
+// it isn't transcribed here, the window does that next with the usual progress bar
+#[tauri::command]
+async fn import_media(app: tauri::AppHandle, state: State<'_, AppState>, source: String, folder: Option<String>) -> Result<ImportedLecture, String> {
+    if state.recording.lock().unwrap().is_some() {
+        return Err("Stop recording before adding a video".into());
+    }
+    let source = PathBuf::from(source);
+    if !source.is_file() {
+        return Err("That isn't a file Lecture can open".into());
+    }
+    let destination = lecture_subfolder(&app, folder.as_deref())?;
+    std::fs::create_dir_all(&destination).map_err(|e| e.to_string())?;
+    // every lecture's time, everywhere, since the time is the file name
+    let taken = lectures::list_lectures(&lecture_folder(&app)?).iter().map(|lecture| lecture.recorded_at).collect();
+    let title = source.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+
+    let (path, length_ms) = tauri::async_runtime::spawn_blocking(move || importer::import_into(&source, &destination, &taken))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(ImportedLecture { path: path.display().to_string(), title, length_ms })
+}
+
+#[derive(serde::Serialize)]
+struct ImportedLecture {
+    path: String,
+    // the file's name, used as the lecture's name
+    title: String,
+    // for the progress bar while it's transcribed
+    length_ms: i64,
 }
 
 #[tauri::command]
@@ -675,6 +708,7 @@ pub fn run() {
             exam_notes,
             course_exam_notes,
             choose_exam,
+            import_media,
             rename_exam,
             cross_check,
             sure_now,

@@ -194,6 +194,7 @@
             Mark this moment <kbd>⌥⌘M</kbd>
           </button>
           <p id="status" class="status" role="status">Press Record when class starts. ⌥⌘M marks a moment from any app.</p>
+          <div id="transcribe-bar" class="transcribe-bar" role="progressbar" aria-label="Transcribing" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><span></span></div>
           <p id="progress" class="progress"></p>
         </section>
 
@@ -247,6 +248,12 @@
           <button id="back-to-playing" class="text-button back-to-playing" type="button" hidden>Back to playing</button>
         </section>
       </main>
+    </div>
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <div class="drop-card">
+        <p id="drop-title" class="drop-title">Drop to add as a lecture</p>
+        <p id="drop-where" class="drop-where"></p>
+      </div>
     </div>
   </body>
 </html>

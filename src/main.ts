@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 // a word a course fix changed. start and end count characters in the line's text
 type WordFix = { start: number; end: number; heard: string };
@@ -2113,10 +2114,21 @@ exportButton.addEventListener("click", async () => {
 let transcribingTotalMs = 0;
 let transcribingLabel = "";
 
+// the bar under the status line while a whole lecture is transcribed
+const transcribeBar = document.querySelector<HTMLElement>("#transcribe-bar")!;
+
+function showTranscribeBar(percent: number | null) {
+  transcribeBar.hidden = percent === null;
+  const value = Math.round(Math.min(100, Math.max(0, percent ?? 0)));
+  transcribeBar.style.setProperty("--done", `${value}%`);
+  transcribeBar.setAttribute("aria-valuenow", String(value));
+}
+
 listen<number>("transcribe-progress", (event) => {
   if (!transcribingLabel) return;
   const done = Math.min(event.payload, transcribingTotalMs);
   statusText.textContent = `${transcribingLabel}: ${formatTime(done)} of ${formatTime(transcribingTotalMs)}`;
+  if (transcribingTotalMs > 0) showTranscribeBar((done / transcribingTotalMs) * 100);
 });
 
 // runs the lecture through the speech model again, the old transcript is kept as .before.json
@@ -2128,6 +2140,7 @@ retranscribeButton.addEventListener("click", async () => {
   statusText.textContent = "Transcribing this lecture again. A 75 minute class takes about 6 to 8 minutes";
   transcribingTotalMs = player.duration > 0 ? player.duration * 1000 : (segments[segments.length - 1]?.end_ms ?? 0);
   transcribingLabel = "Transcribing again";
+  showTranscribeBar(0);
   const started = Date.now();
 
   try {
@@ -2143,6 +2156,7 @@ retranscribeButton.addEventListener("click", async () => {
     transcribingLabel = "";
     statusText.textContent = String(error);
   } finally {
+    showTranscribeBar(null);
     retranscribeButton.disabled = false;
     recordButton.disabled = false;
     retranscribeButton.textContent = "Transcribe again";
@@ -2156,6 +2170,7 @@ async function transcribe(path: string, marks: number[], totalMs: number) {
   statusText.textContent = "Transcribing...";
   transcribingTotalMs = totalMs;
   transcribingLabel = "Transcribing";
+  showTranscribeBar(0);
   const started = Date.now();
 
   try {
@@ -2166,6 +2181,7 @@ async function transcribe(path: string, marks: number[], totalMs: number) {
     if (SHOW_UNSURE) crossCheck(path);
   } finally {
     transcribingLabel = "";
+    showTranscribeBar(null);
   }
 }
 
@@ -2713,5 +2729,85 @@ function drawExamGroups(groups: ExamGroup[]) {
       return section;
     }),
   );
+}
+
+// --- drop a video or audio file on the window to make it a lecture ---
+// the sound is read out of it (importer.rs), saved like a recording, then transcribed as usual.
+// the file you dropped is never changed. (a Pro feature once there's a Pro)
+
+type ImportedLecture = { path: string; title: string; length_ms: number };
+
+const dropOverlay = document.querySelector<HTMLElement>("#drop-overlay")!;
+const dropTitle = document.querySelector<HTMLElement>("#drop-title")!;
+const dropWhere = document.querySelector<HTMLElement>("#drop-where")!;
+let importing = false;
+
+// why a drop can't happen right now, if it can't
+function whyNotImport() {
+  if (recordButton.classList.contains("recording")) return "Stop recording to add a video";
+  if (importing) return "Still adding the last files";
+  if (transcribingLabel) return "Wait for the transcription to finish";
+  return null;
+}
+
+getCurrentWebview().onDragDropEvent((event) => {
+  const drop = event.payload;
+  if (drop.type === "enter") {
+    const blocked = whyNotImport();
+    dropTitle.textContent = blocked ?? "Drop to add as a lecture";
+    const place = recordInto.value;
+    dropWhere.textContent = blocked ? "" : `Saves to ${place ? place.split("/").pop() : "Lectures"}`;
+    dropOverlay.classList.toggle("blocked", blocked !== null);
+    dropOverlay.hidden = false;
+  } else if (drop.type === "leave") {
+    dropOverlay.hidden = true;
+  } else if (drop.type === "drop") {
+    dropOverlay.hidden = true;
+    importFiles(drop.paths);
+  }
+});
+
+async function importFiles(paths: string[]) {
+  const blocked = whyNotImport();
+  if (blocked) {
+    statusText.textContent = blocked;
+    return;
+  }
+  if (paths.length === 0) return;
+  importing = true;
+  recordButton.disabled = true;
+  retranscribeButton.disabled = true;
+  const folder = recordInto.value || null;
+  const failed: string[] = [];
+  let last: ImportedLecture | null = null;
+
+  for (const [index, source] of paths.entries()) {
+    const name = source.split("/").pop() ?? source;
+    const count = paths.length > 1 ? ` (${index + 1} of ${paths.length})` : "";
+    statusText.textContent = `Reading the sound from ${name}${count}`;
+    try {
+      const imported = await invoke<ImportedLecture>("import_media", { source, folder });
+      await refreshLectureList();
+      // the usual transcribing, with the progress bar, then it's named after the file
+      await transcribe(imported.path, [], imported.length_ms);
+      await invoke("rename_lecture", { path: imported.path, title: imported.title });
+      last = imported;
+    } catch (error) {
+      // most errors already name the file
+      const message = String(error);
+      failed.push(message.includes(name) ? message : `${name}: ${message}`);
+    }
+  }
+
+  importing = false;
+  recordButton.disabled = false;
+  retranscribeButton.disabled = false;
+  await refreshLectureList();
+  if (last) await openLecture(last.path);
+  if (failed.length > 0) {
+    statusText.textContent = failed.join(". ");
+  } else {
+    statusText.textContent = paths.length === 1 ? "Added and transcribed" : `Added and transcribed ${paths.length} files`;
+  }
 }
 
