@@ -17,7 +17,7 @@ pub struct Transcript {
 }
 
 // what the lecture list shows for each recording
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct LectureSummary {
     pub path: String,
     pub title: Option<String>,

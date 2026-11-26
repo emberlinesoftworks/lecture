@@ -249,6 +249,19 @@
         </section>
       </main>
     </div>
+    <dialog id="duplicate-dialog" class="ask-dialog" aria-labelledby="duplicate-title">
+      <h2 id="duplicate-title" class="ask-title"></h2>
+      <p id="duplicate-detail" class="ask-detail"></p>
+      <label id="duplicate-rest" class="ask-rest">
+        <input id="duplicate-rest-box" type="checkbox" />
+        Do this for the rest
+      </label>
+      <div class="ask-buttons">
+        <button type="button" class="text-button" data-choice="skip">Skip</button>
+        <button type="button" class="text-button" data-choice="again">Add it again</button>
+        <button type="button" class="download-button" data-choice="open">Open it</button>
+      </div>
+    </dialog>
     <div id="drop-overlay" class="drop-overlay" hidden>
       <div class="drop-card">
         <p id="drop-title" class="drop-title">Drop to add as a lecture</p>

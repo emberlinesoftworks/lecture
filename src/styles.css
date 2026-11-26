@@ -2523,3 +2523,53 @@ body.dragging-lecture * {
   display: none;
 }
 
+/* asking about a file you already imported */
+.ask-dialog {
+  width: min(420px, calc(100vw - 48px));
+  padding: 22px 24px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: 0 24px 48px -16px rgba(0, 0, 0, 0.85);
+}
+
+.ask-dialog::backdrop {
+  background: rgba(11, 6, 5, 0.6);
+}
+
+.ask-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ask-detail {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.ask-rest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+
+.ask-rest[hidden] {
+  display: none;
+}
+
+.ask-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+

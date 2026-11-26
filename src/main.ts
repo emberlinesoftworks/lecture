@@ -2124,10 +2124,26 @@ function showTranscribeBar(percent: number | null) {
   transcribeBar.setAttribute("aria-valuenow", String(value));
 }
 
+let transcribingDoneMs = 0;
+let coolingDown = false;
+
+function showTranscribing() {
+  const cooling = coolingDown ? ". Pausing to let your Mac cool down" : "";
+  statusText.textContent = `${transcribingLabel}: ${formatTime(transcribingDoneMs)} of ${formatTime(transcribingTotalMs)}${cooling}`;
+}
+
+// a whole file takes short breaks when the Mac warms up (transcribe_file_gently in live.rs)
+listen<boolean>("file-resting", (event) => {
+  if (!transcribingLabel) return;
+  coolingDown = event.payload;
+  showTranscribing();
+});
+
 listen<number>("transcribe-progress", (event) => {
   if (!transcribingLabel) return;
   const done = Math.min(event.payload, transcribingTotalMs);
-  statusText.textContent = `${transcribingLabel}: ${formatTime(done)} of ${formatTime(transcribingTotalMs)}`;
+  transcribingDoneMs = done;
+  showTranscribing();
   if (transcribingTotalMs > 0) showTranscribeBar((done / transcribingTotalMs) * 100);
 });
 
@@ -2140,6 +2156,8 @@ retranscribeButton.addEventListener("click", async () => {
   statusText.textContent = "Transcribing this lecture again. A 75 minute class takes about 6 to 8 minutes";
   transcribingTotalMs = player.duration > 0 ? player.duration * 1000 : (segments[segments.length - 1]?.end_ms ?? 0);
   transcribingLabel = "Transcribing again";
+  transcribingDoneMs = 0;
+  coolingDown = false;
   showTranscribeBar(0);
   const started = Date.now();
 
@@ -2170,6 +2188,8 @@ async function transcribe(path: string, marks: number[], totalMs: number) {
   statusText.textContent = "Transcribing...";
   transcribingTotalMs = totalMs;
   transcribingLabel = "Transcribing";
+  transcribingDoneMs = 0;
+  coolingDown = false;
   showTranscribeBar(0);
   const started = Date.now();
 
@@ -2767,6 +2787,46 @@ getCurrentWebview().onDragDropEvent((event) => {
   }
 });
 
+// --- dropping a file you already imported: open the one you have, add it again, or skip ---
+
+type DuplicateChoice = "open" | "again" | "skip";
+
+const duplicateDialog = document.querySelector<HTMLDialogElement>("#duplicate-dialog")!;
+const duplicateTitle = document.querySelector<HTMLElement>("#duplicate-title")!;
+const duplicateDetail = document.querySelector<HTMLElement>("#duplicate-detail")!;
+const duplicateRest = document.querySelector<HTMLElement>("#duplicate-rest")!;
+const duplicateRestBox = document.querySelector<HTMLInputElement>("#duplicate-rest-box")!;
+
+function askAboutDuplicate(have: LectureSummary, moreToGo: boolean) {
+  const name = have.title ?? formatDate(have.recorded_at);
+  duplicateTitle.textContent = "You already have this recording";
+  duplicateDetail.textContent = `It's "${name}" in ${have.folder ? have.folder.split("/").pop() : "Lectures"}. Open it to keep your fixes and notes, or add it again to have two.`;
+  duplicateRest.hidden = !moreToGo;
+  duplicateRestBox.checked = false;
+
+  return new Promise<{ choice: DuplicateChoice; forTheRest: boolean }>((resolve) => {
+    const answer = (choice: DuplicateChoice) => {
+      duplicateDialog.removeEventListener("click", clicked);
+      duplicateDialog.removeEventListener("cancel", cancelled);
+      duplicateDialog.close();
+      resolve({ choice, forTheRest: moreToGo && duplicateRestBox.checked });
+    };
+    const clicked = (event: Event) => {
+      const choice = (event.target as HTMLElement).closest<HTMLButtonElement>("button")?.dataset.choice;
+      if (choice) answer(choice as DuplicateChoice);
+    };
+    // Escape means skip
+    const cancelled = (event: Event) => {
+      event.preventDefault();
+      answer("skip");
+    };
+    duplicateDialog.addEventListener("click", clicked);
+    duplicateDialog.addEventListener("cancel", cancelled);
+    duplicateDialog.showModal();
+    duplicateDialog.querySelector<HTMLButtonElement>('[data-choice="open"]')!.focus();
+  });
+}
+
 async function importFiles(paths: string[]) {
   const blocked = whyNotImport();
   if (blocked) {
@@ -2780,10 +2840,37 @@ async function importFiles(paths: string[]) {
   const folder = recordInto.value || null;
   const failed: string[] = [];
   let last: ImportedLecture | null = null;
+  let added = 0;
+  let skipped = 0;
+  let openInstead: string | null = null;
+  // "do this for the rest"
+  let sameForTheRest: DuplicateChoice | null = null;
 
   for (const [index, source] of paths.entries()) {
     const name = source.split("/").pop() ?? source;
     const count = paths.length > 1 ? ` (${index + 1} of ${paths.length})` : "";
+    try {
+      const have = await invoke<LectureSummary | null>("already_imported", { source });
+      if (have) {
+        let choice: DuplicateChoice | null = sameForTheRest;
+        if (!choice) {
+          const answer = await askAboutDuplicate(have, index < paths.length - 1);
+          choice = answer.choice;
+          if (answer.forTheRest) sameForTheRest = choice;
+        }
+        if (choice === "open") {
+          openInstead = have.path;
+          skipped++;
+          continue;
+        }
+        if (choice === "skip") {
+          skipped++;
+          continue;
+        }
+      }
+    } catch {
+      // couldn't check, so just add it
+    }
     statusText.textContent = `Reading the sound from ${name}${count}`;
     try {
       const imported = await invoke<ImportedLecture>("import_media", { source, folder });
@@ -2792,6 +2879,7 @@ async function importFiles(paths: string[]) {
       await transcribe(imported.path, [], imported.length_ms);
       await invoke("rename_lecture", { path: imported.path, title: imported.title });
       last = imported;
+      added++;
     } catch (error) {
       // most errors already name the file
       const message = String(error);
@@ -2803,11 +2891,16 @@ async function importFiles(paths: string[]) {
   recordButton.disabled = false;
   retranscribeButton.disabled = false;
   await refreshLectureList();
-  if (last) await openLecture(last.path);
+  // the last one added, or the one you chose to open instead
+  const toOpen = last?.path ?? openInstead;
+  if (toOpen) await openLecture(toOpen);
   if (failed.length > 0) {
     statusText.textContent = failed.join(". ");
+  } else if (added === 0) {
+    statusText.textContent = "";
   } else {
-    statusText.textContent = paths.length === 1 ? "Added and transcribed" : `Added and transcribed ${paths.length} files`;
+    const skippedNote = skipped > 0 ? `, skipped ${skipped} you already had` : "";
+    statusText.textContent = (added === 1 ? "Added and transcribed" : `Added and transcribed ${added} files`) + skippedNote;
   }
 }
 

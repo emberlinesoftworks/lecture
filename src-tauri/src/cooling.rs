@@ -8,6 +8,8 @@ use std::time::Duration;
 #[derive(Debug, PartialEq)]
 pub enum Heat {
     Normal,
+    // macos calls this "fair": a little warm. class ignores it, files take short breaks
+    Fair,
     // macos calls this "serious": time to back off
     Warm,
     // macos calls this "critical": stop until it cools down
@@ -20,6 +22,7 @@ pub fn current_heat() -> Heat {
     use objc2_foundation::{NSProcessInfo, NSProcessInfoThermalState};
 
     match NSProcessInfo::processInfo().thermalState() {
+        NSProcessInfoThermalState::Fair => Heat::Fair,
         NSProcessInfoThermalState::Serious => Heat::Warm,
         NSProcessInfoThermalState::Critical => Heat::Hot,
         _ => Heat::Normal,
@@ -70,10 +73,66 @@ pub fn rest(length: Duration, finished: &AtomicBool) {
     }
 }
 
+// for a whole file (an import, Transcribe again): whisper goes through it in one pass, which
+// gives the best punctuation, and reports progress every 5% or so. stopping for a moment at those
+// reports pauses whisper too, so this slows the pass down once the mac warms up.
+// (splitting the file into minute-long pieces instead cost punctuation: tested Nov 25 on 6.1)
+pub struct Pacer {
+    last: std::sync::Mutex<std::time::Instant>,
+}
+
+impl Pacer {
+    pub fn new() -> Self {
+        Self { last: std::sync::Mutex::new(std::time::Instant::now()) }
+    }
+
+    // call at each progress report. on_resting(true) when it starts a break, (false) when it ends
+    pub fn pause_if_warm(&self, on_resting: &dyn Fn(bool)) {
+        let worked = self.last.lock().unwrap().elapsed();
+        let pause = pause_for(&current_heat(), worked);
+        if !pause.is_zero() {
+            on_resting(true);
+            thread::sleep(pause);
+            // hot: keep waiting until it isn't
+            while current_heat() == Heat::Hot {
+                thread::sleep(Duration::from_secs(10));
+            }
+            on_resting(false);
+        }
+        *self.last.lock().unwrap() = std::time::Instant::now();
+    }
+}
+
+impl Default for Pacer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// how long to stop after `worked` of transcribing: nothing while cool, as long again once it's
+// a little warm (about half speed), and at least 20 seconds when it's warm
+fn pause_for(heat: &Heat, worked: Duration) -> Duration {
+    match heat {
+        Heat::Normal => Duration::ZERO,
+        Heat::Fair => worked,
+        Heat::Warm => (worked * 2).max(Duration::from_secs(20)),
+        Heat::Hot => Duration::from_secs(10),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn files_slow_down_as_the_mac_warms_up() {
+        let worked = Duration::from_secs(4);
+        assert_eq!(pause_for(&Heat::Normal, worked), Duration::ZERO);
+        assert_eq!(pause_for(&Heat::Fair, worked), worked);
+        assert_eq!(pause_for(&Heat::Warm, worked), Duration::from_secs(20));
+        assert_eq!(pause_for(&Heat::Warm, Duration::from_secs(15)), Duration::from_secs(30));
+    }
 
     #[test]
     fn rest_ends_right_away_once_the_recording_stops() {

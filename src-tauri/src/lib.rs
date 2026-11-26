@@ -246,6 +246,13 @@ async fn import_media(app: tauri::AppHandle, state: State<'_, AppState>, source:
     Ok(ImportedLecture { path: path.display().to_string(), title, length_ms })
 }
 
+// a lecture you already have from the same file, so the window can ask before importing it twice
+#[tauri::command]
+fn already_imported(app: tauri::AppHandle, source: String) -> Result<Option<lectures::LectureSummary>, String> {
+    let lectures = lectures::list_lectures(&lecture_folder(&app)?);
+    Ok(importer::already_have(&lectures, std::path::Path::new(&source)).cloned())
+}
+
 #[derive(serde::Serialize)]
 struct ImportedLecture {
     path: String,
@@ -253,6 +260,24 @@ struct ImportedLecture {
     title: String,
     // for the progress bar while it's transcribed
     length_ms: i64,
+}
+
+// a whole recording at once (an import, Transcribe again), at a pace that keeps the mac cool
+fn transcribe_file(app: &tauri::AppHandle, model_path: &std::path::Path, wav_path: &std::path::Path) -> Result<Vec<transcriber::Segment>, String> {
+    let report = progress_reporter(app);
+    let resting_app = app.clone();
+    let pacer = cooling::Pacer::new();
+    let paced: transcriber::ProgressReport = std::sync::Arc::new(move |done_ms| {
+        report(done_ms);
+        pacer.pause_if_warm(&|resting| {
+            let _ = resting_app.emit("file-resting", resting);
+        });
+    });
+    // low priority like during class, then back to normal since this thread gets reused
+    cooling::run_in_background();
+    let lines = transcriber::transcribe(model_path, wav_path, paced);
+    cooling::hurry_up();
+    lines
 }
 
 #[tauri::command]
@@ -266,7 +291,7 @@ async fn transcribe(app: tauri::AppHandle, path: String, marks: Vec<u64>) -> Res
     let wav_path = lecture_file(&app, &path)?;
     let progress_app = app.clone();
     let lines = tauri::async_runtime::spawn_blocking(move || {
-        transcriber::transcribe(&model_path, &wav_path, progress_reporter(&progress_app))
+        transcribe_file(&progress_app, &model_path, &wav_path)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -304,7 +329,7 @@ async fn retranscribe(app: tauri::AppHandle, path: String) -> Result<Transcript,
     let audio_path = wav_path.clone();
     let progress_app = app.clone();
     let lines = tauri::async_runtime::spawn_blocking(move || {
-        transcriber::transcribe(&model_path, &audio_path, progress_reporter(&progress_app))
+        transcribe_file(&progress_app, &model_path, &audio_path)
     })
         .await
         .map_err(|e| e.to_string())??;
@@ -709,6 +734,7 @@ pub fn run() {
             course_exam_notes,
             choose_exam,
             import_media,
+            already_imported,
             rename_exam,
             cross_check,
             sure_now,
