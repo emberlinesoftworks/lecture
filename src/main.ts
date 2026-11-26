@@ -2414,6 +2414,9 @@ type ModelStatus = {
   fast_downloaded: boolean;
   accurate_downloaded: boolean;
   full_speed: boolean;
+  // without Pro, Most accurate can't be picked
+  pro: boolean;
+  free_during_beta: boolean;
 };
 
 const modelLabels: Record<ModelChoice, string> = { fast: "Fast", accurate: "Most accurate" };
@@ -2431,6 +2434,7 @@ function isDownloaded(choice: ModelChoice) {
 }
 
 function pickModel(choice: ModelChoice) {
+  if (choice === "accurate" && !modelStatus?.pro) choice = "fast";
   pickedModel = choice;
   modelChoices.forEach((button) => {
     button.setAttribute("aria-checked", String(button.dataset.choice === choice));
@@ -2455,8 +2459,19 @@ function showSetup(firstLaunch: boolean) {
   // a choice for later, not something to decide while setting up for the first time
   fullSpeed.hidden = firstLaunch;
   fullSpeedBox.checked = modelStatus?.full_speed ?? false;
+  showWhatsPro();
   setupError.textContent = "";
-  pickModel(modelStatus?.current ?? "accurate");
+  pickModel(modelStatus?.current ?? (modelStatus?.pro ? "accurate" : "fast"));
+}
+
+const accurateChoice = document.querySelector<HTMLButtonElement>('.model-choice[data-choice="accurate"]')!;
+const accurateSize = document.querySelector<HTMLElement>("#accurate-size")!;
+
+// greys out the Pro things in the free version
+function showWhatsPro() {
+  const pro = modelStatus?.pro ?? false;
+  accurateChoice.disabled = !pro;
+  accurateSize.textContent = modelStatus?.free_during_beta ? "1.6 GB, free during the beta" : "1.6 GB";
 }
 
 function hideSetup() {

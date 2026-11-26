@@ -2605,6 +2605,20 @@ body.dragging-lecture * {
   font-size: 14.5px;
 }
 
+/* the Pro things in the free version */
+.model-choice:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.model-choice:disabled:active {
+  transform: none;
+}
+
+.model-choice:disabled:hover {
+  border-color: var(--line);
+}
+
 .full-speed-note {
   color: var(--text-muted);
   font-size: 13px;

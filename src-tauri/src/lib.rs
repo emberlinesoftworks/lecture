@@ -52,7 +52,7 @@ fn models_folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 // and the window shows the first launch screen
 fn model_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let folder = models_folder(app)?;
-    let choice = models::current_choice(&folder).unwrap_or(models::Choice::Accurate);
+    let choice = models::current_choice(&folder, pro()).unwrap_or(models::Choice::Fast);
     Ok(folder.join(models::model_file(choice).file_name))
 }
 
@@ -492,7 +492,7 @@ async fn cross_check(app: tauri::AppHandle, state: State<'_, AppState>, path: St
         return Ok(transcript);
     }
     let folder = models_folder(&app)?;
-    let other = match models::current_choice(&folder) {
+    let other = match models::current_choice(&folder, pro()) {
         Some(models::Choice::Fast) => models::Choice::Accurate,
         _ => models::Choice::Fast,
     };
@@ -678,12 +678,17 @@ fn set_full_speed(app: tauri::AppHandle, on: bool) -> Result<(), String> {
 
 #[tauri::command]
 fn model_status(app: tauri::AppHandle) -> Result<models::ModelStatus, String> {
-    Ok(models::status(&models_folder(&app)?))
+    let mut status = models::status(&models_folder(&app)?, pro());
+    status.free_during_beta = PRO_FREE_DURING_BETA;
+    Ok(status)
 }
 
 // downloads the model you picked (and the voice detector), then switches to it
 #[tauri::command]
 async fn download_model(app: tauri::AppHandle, choice: models::Choice) -> Result<(), String> {
+    if !models::allowed(choice, pro()) {
+        return Err(NEEDS_PRO.into());
+    }
     let folder = models_folder(&app)?;
     let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -698,6 +703,9 @@ async fn download_model(app: tauri::AppHandle, choice: models::Choice) -> Result
 // switches between models that are already downloaded
 #[tauri::command]
 fn use_model(app: tauri::AppHandle, choice: models::Choice) -> Result<(), String> {
+    if !models::allowed(choice, pro()) {
+        return Err(NEEDS_PRO.into());
+    }
     models::save_choice(&models_folder(&app)?, choice)
 }
 
@@ -706,9 +714,37 @@ fn mark_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::ALT | Modifiers::SUPER), Code::KeyM)
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
+// --- free and Pro ---
+// this repo builds the free version. the Pro version is a separate app that runs this
+// same code through run_with_pro and adds its own features as a plugin
+
+// Pro features are unlocked for everyone until the paid launch. turn this off then
+const PRO_FREE_DURING_BETA: bool = true;
+
+const NEEDS_PRO: &str = "That's part of Lecture Pro.";
+
+static PRO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn pro() -> bool {
+    PRO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// each app passes in its own context (tauri.conf.json, icons, permissions) from its main.rs
+pub fn run(context: tauri::Context<tauri::Wry>) {
+    start(context, None)
+}
+
+pub fn run_with_pro(context: tauri::Context<tauri::Wry>, pro_features: tauri::plugin::TauriPlugin<tauri::Wry>) {
+    start(context, Some(pro_features))
+}
+
+fn start(context: tauri::Context<tauri::Wry>, pro_features: Option<tauri::plugin::TauriPlugin<tauri::Wry>>) {
+    PRO.store(pro_features.is_some() || PRO_FREE_DURING_BETA, std::sync::atomic::Ordering::Relaxed);
+    let mut builder = tauri::Builder::default();
+    if let Some(pro_features) = pro_features {
+        builder = builder.plugin(pro_features);
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -771,6 +807,6 @@ pub fn run() {
             download_model,
             use_model
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

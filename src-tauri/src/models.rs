@@ -98,15 +98,23 @@ fn is_downloaded(models_folder: &Path, choice: Choice) -> bool {
     models_folder.join(model_file(choice).file_name).exists()
 }
 
+// Most accurate is a Pro model
+pub fn allowed(choice: Choice, pro: bool) -> bool {
+    pro || choice == Choice::Fast
+}
+
 // the model to use: whatever was picked, otherwise whichever one is there
-// (most accurate first). None means nothing is downloaded yet
-pub fn current_choice(models_folder: &Path) -> Option<Choice> {
+// (most accurate first). without Pro it's always Fast, even if Most accurate is
+// downloaded. None means nothing usable is downloaded yet
+pub fn current_choice(models_folder: &Path, pro: bool) -> Option<Choice> {
     if let Some(choice) = load_settings(models_folder).speech_model {
-        if is_downloaded(models_folder, choice) {
+        if allowed(choice, pro) && is_downloaded(models_folder, choice) {
             return Some(choice);
         }
     }
-    [Choice::Accurate, Choice::Fast].into_iter().find(|&choice| is_downloaded(models_folder, choice))
+    [Choice::Accurate, Choice::Fast]
+        .into_iter()
+        .find(|&choice| allowed(choice, pro) && is_downloaded(models_folder, choice))
 }
 
 #[derive(Serialize)]
@@ -115,14 +123,20 @@ pub struct ModelStatus {
     pub fast_downloaded: bool,
     pub accurate_downloaded: bool,
     pub full_speed: bool,
+    // false means Most accurate shows as Pro and can't be picked
+    pub pro: bool,
+    // shows "free during the beta" on Most accurate
+    pub free_during_beta: bool,
 }
 
-pub fn status(models_folder: &Path) -> ModelStatus {
+pub fn status(models_folder: &Path, pro: bool) -> ModelStatus {
     ModelStatus {
-        current: current_choice(models_folder),
+        current: current_choice(models_folder, pro),
         fast_downloaded: is_downloaded(models_folder, Choice::Fast),
         accurate_downloaded: is_downloaded(models_folder, Choice::Accurate),
         full_speed: full_speed(models_folder),
+        pro,
+        free_during_beta: false,
     }
 }
 
@@ -264,14 +278,14 @@ mod tests {
     #[test]
     fn nothing_downloaded_means_first_launch() {
         let folder = empty_folder("nothing");
-        assert_eq!(current_choice(&folder), None);
+        assert_eq!(current_choice(&folder, true), None);
     }
 
     #[test]
     fn uses_whatever_model_is_there() {
         let folder = empty_folder("whatever");
         fs::write(folder.join("ggml-small.en.bin"), "x").unwrap();
-        assert_eq!(current_choice(&folder), Some(Choice::Fast));
+        assert_eq!(current_choice(&folder, true), Some(Choice::Fast));
     }
 
     #[test]
@@ -279,10 +293,25 @@ mod tests {
         let folder = empty_folder("picked");
         fs::write(folder.join("ggml-small.en.bin"), "x").unwrap();
         fs::write(folder.join("ggml-large-v3-turbo.bin"), "x").unwrap();
-        assert_eq!(current_choice(&folder), Some(Choice::Accurate));
+        assert_eq!(current_choice(&folder, true), Some(Choice::Accurate));
 
         save_choice(&folder, Choice::Fast).unwrap();
-        assert_eq!(current_choice(&folder), Some(Choice::Fast));
+        assert_eq!(current_choice(&folder, true), Some(Choice::Fast));
+    }
+
+    #[test]
+    fn free_version_falls_back_to_fast() {
+        let folder = empty_folder("free");
+        fs::write(folder.join("ggml-large-v3-turbo.bin"), "x").unwrap();
+        save_choice(&folder, Choice::Accurate).unwrap();
+        // only Most accurate is there, so there's nothing it can use yet
+        assert_eq!(current_choice(&folder, false), None);
+
+        fs::write(folder.join("ggml-small.en.bin"), "x").unwrap();
+        assert_eq!(current_choice(&folder, false), Some(Choice::Fast));
+
+        // and Pro picks up right where it was
+        assert_eq!(current_choice(&folder, true), Some(Choice::Accurate));
     }
 
     #[test]
